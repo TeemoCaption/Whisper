@@ -1,0 +1,137 @@
+data:
+  root: data/zh-TW
+  train_split: train
+  dev_split: dev
+  test_split: test
+  tokenizer_text_splits: [train, dev, test, validated]
+  sample_rate: 16000
+  max_audio_seconds: 30.0
+  text_normalization:
+    enabled: true
+    apply_nfkc: true
+    remove_punctuation: true
+    remove_whitespace: true
+  audio_augmentation:
+    enabled: true
+    speed_factors: [0.95, 1.0, 1.05]
+    speed_prob: 0.4
+    noise_prob: 0.35
+    min_snr_db: 18.0
+    max_snr_db: 30.0
+    gain_prob: 0.3
+    min_gain_db: -3.0
+    max_gain_db: 3.0
+    shift_prob: 0.2
+    max_shift_ms: 120.0
+  feature_cache:
+    enabled: true
+    root: artifacts/feature_cache_h100
+    strict: true
+    train_variants: 4
+
+tokenizer:
+  type: sentencepiece
+  model_type: unigram
+  vocab_size: 4000
+  model_path: artifacts/tokenizer/spm_zh_tw_4k.model
+  character_coverage: 0.9995
+  pad_id: 0
+  unk_id: 1
+  bos_id: 2
+  eos_id: 3
+
+model:
+  whisper_name: openai/whisper-medium
+  freeze_whisper_encoder: true
+  unfreeze_encoder_last_n_layers: 4
+
+  bopomofo_ctc:
+    enabled: true
+    loss_weight: 0.15
+
+  acoustic_encoder:
+    num_layers: 2
+    num_heads: 8
+    hidden_size: 768
+    dropout: 0.15
+
+  acoustic_compressor:
+    stride: 4
+    num_layers: 1
+    num_heads: 8
+    dropout: 0.1
+
+  context_corrector:
+    output_type: plain_chinese_text
+    num_layers: 2
+    num_heads: 8
+    hidden_size: 512
+    dropout: 0.2
+    max_target_length: 256
+    loss_weight: 0.25
+
+training:
+  batch_size: 96
+  eval_batch_size: 256
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00025
+  encoder_learning_rate: 0.00002
+  weight_decay: 0.01
+  text_loss_weight: 0.85
+  text_label_smoothing: 0.02
+  num_epochs: 80
+  num_workers: 0
+  prefetch_factor: 2
+  eval_num_workers: 0
+  eval_prefetch_factor: 2
+  sharing_strategy: file_system
+  pin_memory: false
+  eval_pin_memory: false
+  persistent_workers: false
+  eval_persistent_workers: false
+  mixed_precision: true
+  amp_dtype: bf16
+  allow_tf32: true
+  cudnn_benchmark: true
+  enable_flash_sdp: true
+  enable_mem_efficient_sdp: true
+  enable_math_sdp: false
+  fused_adamw: true
+  feature_padding: max_length
+  feature_pad_to_multiple_of:
+  compile:
+    enabled: false
+    mode: reduce-overhead
+    fullgraph: false
+    dynamic: true
+  float32_matmul_precision: high
+  log_every: 100
+  output_dir: artifacts/checkpoints_h100
+  device: cuda
+  checkpoint_monitor: val_text_loss
+  early_stopping:
+    enabled: true
+    monitor: val_text_loss
+    patience: 4
+    min_delta: 0.005
+  scheduler:
+    type: warmup_reduce_on_plateau
+    monitor: val_text_loss
+    warmup_epochs: 1
+    warmup_start_factor: 0.3
+    factor: 0.5
+    patience: 2
+    threshold: 0.005
+    threshold_mode: abs
+    cooldown: 1
+    min_lr: 0.000001
+
+wandb:
+  enabled: true
+  project: Whisper-TW
+  name: whisper-medium-ctc-first-h100-spm4k
+  mode: online
+  console: redirect
+
+generation:
+  max_new_tokens: 128

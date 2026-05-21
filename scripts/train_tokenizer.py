@@ -31,7 +31,11 @@ def main() -> int:
     splits = list(config["data"]["tokenizer_text_splits"])
     count = 0
     with corpus_path.open("w", encoding="utf-8", newline="\n") as f:
-        for sentence in iter_tokenizer_sentences(config["data"]["root"], splits):
+        for sentence in iter_tokenizer_sentences(
+            config["data"]["root"],
+            splits,
+            config["data"].get("text_normalization"),
+        ):
             f.write(sentence.replace("\n", " ").strip() + "\n")
             count += 1
 

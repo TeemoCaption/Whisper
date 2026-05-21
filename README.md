@@ -9,17 +9,17 @@ python .\scripts\download_data.py --output-dir .\data
 訓練 SentencePiece tokenizer：
 
 ```powershell
-python .\scripts\train_tokenizer.py --config .\configs\whisper_tw_medium_qformer.yaml
+python .\scripts\train_tokenizer.py --config .\configs\config.yaml
 ```
 
 訓練 Whisper-TW 模型：
 
 ```powershell
-python .\scripts\train.py --config .\configs\whisper_tw_medium_qformer.yaml
+python .\scripts\train.py --config .\configs\config.yaml
 ```
 
 評估模型：
 
 ```powershell
-python .\scripts\evaluate.py --config .\configs\whisper_tw_medium_qformer.yaml --split test --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt
+python .\scripts\evaluate.py --config .\configs\config.yaml --split test --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt
 ```
