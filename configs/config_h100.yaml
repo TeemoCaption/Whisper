@@ -3,6 +3,9 @@ data:
   train_split: train
   dev_split: dev
   test_split: test
+  train_tsv: data/zh-TW/train.tsv
+  dev_tsv: data/zh-TW/dev.tsv
+  test_tsv: data/zh-TW/test.tsv
   tokenizer_text_splits: [train, dev, test, validated]
   sample_rate: 16000
   max_audio_seconds: 30.0

@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from whisper_tw.config import load_config
-from whisper_tw.data import iter_tokenizer_sentences
+from whisper_tw.data import iter_tokenizer_sentences, resolve_common_voice_split_source
 from whisper_tw.tokenizer import train_sentencepiece_from_corpus
 
 
@@ -29,11 +29,16 @@ def main() -> int:
     corpus_path.parent.mkdir(parents=True, exist_ok=True)
 
     splits = list(config["data"]["tokenizer_text_splits"])
+    split_sources = {
+        split: resolve_common_voice_split_source(config["data"], split)
+        for split in splits
+    }
     count = 0
     with corpus_path.open("w", encoding="utf-8", newline="\n") as f:
         for sentence in iter_tokenizer_sentences(
             config["data"]["root"],
             splits,
+            split_sources,
             config["data"].get("text_normalization"),
         ):
             f.write(sentence.replace("\n", " ").strip() + "\n")

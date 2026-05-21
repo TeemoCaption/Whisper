@@ -13,7 +13,12 @@ from transformers import WhisperFeatureExtractor
 
 from .bopomofo import BopomofoVocab
 from .config import resolve_device
-from .data import CommonVoiceTaiwanDataset, WhisperTWCollator, build_audio_augmentor
+from .data import (
+    CommonVoiceTaiwanDataset,
+    WhisperTWCollator,
+    build_audio_augmentor,
+    resolve_common_voice_split_source,
+)
 from .model import WhisperTWModel
 from .text_normalization import build_text_normalizer
 from .tokenizer import SentencePieceTextTokenizer
@@ -135,6 +140,7 @@ def build_components(
     feature_cache_enabled = bool(feature_cache_cfg.get("enabled", False))
     feature_cache_dir = feature_cache_cfg.get("root")
     train_split = data_cfg.get("train_split", "train")
+    split_source = resolve_common_voice_split_source(data_cfg, split)
     feature_cache_variants = int(
         feature_cache_cfg.get(
             "train_variants",
@@ -149,6 +155,7 @@ def build_components(
     dataset = CommonVoiceTaiwanDataset(
         data_root=data_cfg["root"],
         split=split,
+        split_source=split_source,
         text_tokenizer=tokenizer,
         bopomofo_vocab=bopomofo_vocab,
         sample_rate=int(data_cfg.get("sample_rate", 16000)),
@@ -537,6 +544,9 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
         val_dataset = CommonVoiceTaiwanDataset(
             data_root=config["data"]["root"],
             split=config["data"].get("dev_split", "dev"),
+            split_source=resolve_common_voice_split_source(
+                config["data"], config["data"].get("dev_split", "dev")
+            ),
             text_tokenizer=SentencePieceTextTokenizer(
                 config["tokenizer"]["model_path"]
             ),

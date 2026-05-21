@@ -12,7 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from whisper_tw.config import load_config
-from whisper_tw.data import build_audio_augmentor, precompute_feature_cache
+from whisper_tw.data import (
+    build_audio_augmentor,
+    precompute_feature_cache,
+    resolve_common_voice_split_source,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +57,7 @@ def main() -> int:
     total_written = 0
     total_skipped = 0
     for split in splits:
+        split_source = resolve_common_voice_split_source(data_cfg, split)
         num_variants = (
             int(cache_cfg.get("train_variants", 1))
             if split == train_split
@@ -61,6 +66,7 @@ def main() -> int:
         written, skipped = precompute_feature_cache(
             data_root=data_cfg["root"],
             split=split,
+            split_source=split_source,
             cache_root=cache_root,
             feature_extractor=feature_extractor,
             sample_rate=int(data_cfg.get("sample_rate", 16000)),

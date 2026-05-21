@@ -23,12 +23,6 @@ from whisper_tw.training import build_components
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="評估 Whisper-TW 模型。")
     parser.add_argument("--config", required=True, help="設定檔路徑。")
-    parser.add_argument(
-        "--split",
-        default="test",
-        choices=["train", "dev", "test"],
-        help="評估資料切分。",
-    )
     parser.add_argument("--checkpoint", help="模型 checkpoint 路徑。")
     parser.add_argument("--max-samples", type=int, help="只評估前 N 筆樣本。")
     parser.add_argument("--audio", help="辨識單一音訊檔，支援超過 30 秒的長音訊。")
@@ -46,7 +40,7 @@ def load_audio(path: str | Path, sample_rate: int) -> torch.Tensor:
 def transcribe_audio(args: argparse.Namespace, config: dict) -> int:
     device = torch.device(resolve_device(config))
     tokenizer, _, collator, model = build_components(
-        config, config["data"].get("test_split", "test"), None
+        config, "test", None
     )
     if args.checkpoint:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -80,8 +74,9 @@ def main() -> int:
     if args.audio:
         return transcribe_audio(args, config)
     device = torch.device(resolve_device(config))
+    test_split = config["data"].get("test_split", "test")
     tokenizer, dataset, collator, model = build_components(
-        config, args.split, args.max_samples
+        config, test_split, args.max_samples
     )
     if args.checkpoint:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -121,7 +116,7 @@ def main() -> int:
 
     elapsed = time.perf_counter() - start
     cer = character_error_rate(predictions, references)
-    print(f"split={args.split}")
+    print(f"split={test_split}")
     print(f"samples={len(references)}")
     print(f"cer={cer:.4f}")
     print(f"elapsed_seconds={elapsed:.3f}")

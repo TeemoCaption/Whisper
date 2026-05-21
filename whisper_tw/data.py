@@ -107,11 +107,37 @@ def build_audio_augmentor(
     )
 
 
+def resolve_common_voice_split_source(
+    data_cfg: dict[str, Any],
+    split: str,
+) -> str | Path:
+    split_paths = data_cfg.get("split_paths", {})
+    if isinstance(split_paths, dict):
+        split_source = split_paths.get(split)
+        if split_source:
+            return split_source
+
+    split_tsv_key = f"{split}_tsv"
+    if data_cfg.get(split_tsv_key):
+        return data_cfg[split_tsv_key]
+
+    split_name_key = f"{split}_split"
+    if data_cfg.get(split_name_key):
+        return data_cfg[split_name_key]
+
+    return split
+
+
 def read_common_voice_split(
-    data_root: str | Path, split: str
+    data_root: str | Path,
+    split: str | Path,
 ) -> list[CommonVoiceSample]:
     root = Path(data_root)
-    tsv_path = root / f"{split}.tsv"
+    split_path = Path(split)
+    if split_path.exists() or split_path.suffix == ".tsv":
+        tsv_path = split_path
+    else:
+        tsv_path = root / f"{split}.tsv"
     if not tsv_path.exists():
         raise FileNotFoundError(f"Missing Common Voice split: {tsv_path}")
 
@@ -172,9 +198,10 @@ class CommonVoiceTaiwanDataset(Dataset):
         require_feature_cache: bool = False,
         feature_cache_variants: int = 1,
         sample_cached_variant: bool = False,
+        split_source: str | Path | None = None,
     ) -> None:
         self.split = split
-        self.samples = read_common_voice_split(data_root, split)
+        self.samples = read_common_voice_split(data_root, split_source or split)
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
         self.text_tokenizer = text_tokenizer
@@ -306,8 +333,9 @@ def precompute_feature_cache(
     num_variants: int = 1,
     overwrite: bool = False,
     max_samples: int | None = None,
+    split_source: str | Path | None = None,
 ) -> tuple[int, int]:
-    samples = read_common_voice_split(data_root, split)
+    samples = read_common_voice_split(data_root, split_source or split)
     if max_samples is not None:
         samples = samples[:max_samples]
     max_audio_samples = int(sample_rate * max_audio_seconds)
@@ -356,11 +384,13 @@ def precompute_feature_cache(
 def iter_tokenizer_sentences(
     data_root: str | Path,
     splits: list[str],
+    split_sources: dict[str, str | Path] | None = None,
     text_normalization_cfg: dict[str, Any] | None = None,
 ):
     normalizer = build_text_normalizer(text_normalization_cfg)
     for split in splits:
-        for sample in read_common_voice_split(data_root, split):
+        split_source = split_sources.get(split) if split_sources else None
+        for sample in read_common_voice_split(data_root, split_source or split):
             if not normalizer.enabled:
                 yield sample.text
                 continue

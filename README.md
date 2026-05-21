@@ -21,5 +21,5 @@ python .\scripts\train.py --config .\configs\config.yaml
 評估模型：
 
 ```powershell
-python .\scripts\evaluate.py --config .\configs\config.yaml --split test --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt
+python .\scripts\evaluate.py --config .\configs\config.yaml --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt
 ```
