@@ -57,6 +57,7 @@ model:
     loss_weight: 0.15
 
   text_ctc:
+    loss_weight: 1.0
     dropout: 0.25
 
   acoustic_encoder:
@@ -89,8 +90,6 @@ training:
   learning_rate: 0.0003
   encoder_learning_rate: 0.00003
   weight_decay: 0.015
-  text_loss_weight: 1.0
-  text_label_smoothing: 0.0
   grad_clip_norm: 1.0
   feature_spec_augment:
     enabled: true
@@ -128,15 +127,15 @@ training:
   log_every: 100
   output_dir: artifacts/checkpoints_h100
   device: cuda
-  checkpoint_monitor: val_text_loss
+  checkpoint_monitor: val_correction_loss
   early_stopping:
     enabled: true
-    monitor: val_text_loss
+    monitor: val_correction_loss
     patience: 4
     min_delta: 0.005
   scheduler:
     type: warmup_cosine_restarts
-    monitor: val_text_ctc_loss
+    monitor: val_correction_loss
     warmup_epochs: 1
     warmup_start_factor: 0.3
     t_0: 6

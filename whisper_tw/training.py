@@ -195,11 +195,9 @@ def build_components(
     )
     model = WhisperTWModel(
         config=config,
-        vocab_size=tokenizer.vocab_size,
         text_ctc_vocab_size=character_vocab.size,
         text_ctc_pad_id=character_vocab.blank_id,
         bopomofo_vocab_size=bopomofo_vocab.size,
-        text_pad_id=tokenizer.pad_id,
     )
     return tokenizer, dataset, collator, model
 
@@ -431,8 +429,6 @@ def get_validation_monitor_value(
     metric_aliases = {
         "val_loss": "loss",
         "loss": "loss",
-        "val_text_loss": "text_loss",
-        "text_loss": "text_loss",
         "val_text_ctc_loss": "text_ctc_loss",
         "text_ctc_loss": "text_ctc_loss",
         "val_correction_loss": "correction_loss",
@@ -605,7 +601,6 @@ def val_loss(
 ) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
-    total_text_loss = 0.0
     total_text_ctc_loss = 0.0
     total_correction_loss = 0.0
     total_ctc_loss = 0.0
@@ -622,8 +617,6 @@ def val_loss(
         with autocast_context(device, amp_enabled, amp_dtype):
             output = model(
                 input_features=batch["input_features"],
-                decoder_input_ids=batch["decoder_input_ids"],
-                labels=batch["labels"],
                 text_ctc_labels=batch["text_ctc_labels"],
                 bopomofo_labels=batch["bopomofo_labels"],
                 bopomofo_label_lengths=batch["bopomofo_label_lengths"],
@@ -631,11 +624,6 @@ def val_loss(
         if output.loss is None:
             raise RuntimeError("Validation loss is None.")
         total_loss += float(output.loss.detach().cpu())
-        total_text_loss += (
-            float(output.text_loss.detach().cpu())
-            if output.text_loss is not None
-            else 0.0
-        )
         total_text_ctc_loss += (
             float(output.text_ctc_loss.detach().cpu())
             if output.text_ctc_loss is not None
@@ -658,7 +646,6 @@ def val_loss(
     denom = max(total_batches, 1)
     return {
         "loss": total_loss / denom,
-        "text_loss": total_text_loss / denom,
         "text_ctc_loss": total_text_ctc_loss / denom,
         "correction_loss": total_correction_loss / denom,
         "bopomofo_ctc_loss": total_ctc_loss / denom,
@@ -754,7 +741,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
         num_epochs = int(train_cfg.get("num_epochs", 1))
         for epoch in range(1, num_epochs + 1):
             epoch_loss = 0.0
-            epoch_text_loss = 0.0
             epoch_text_ctc_loss = 0.0
             epoch_correction_loss = 0.0
             epoch_ctc_loss = 0.0
@@ -781,8 +767,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
                 with autocast_context(device, amp_enabled, amp_dtype):
                     output = model(
                         input_features=batch["input_features"],
-                        decoder_input_ids=batch["decoder_input_ids"],
-                        labels=batch["labels"],
                         text_ctc_labels=batch["text_ctc_labels"],
                         bopomofo_labels=batch["bopomofo_labels"],
                         bopomofo_label_lengths=batch["bopomofo_label_lengths"],
@@ -808,11 +792,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
 
                 epoch_loss += float(output.loss.detach().cpu())
                 epoch_batches += 1
-                text_loss = (
-                    output.text_loss.item()
-                    if output.text_loss is not None
-                    else float("nan")
-                )
                 ctc_loss = (
                     output.bopomofo_ctc_loss.item()
                     if output.bopomofo_ctc_loss is not None
@@ -828,7 +807,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
                     if output.correction_loss is not None
                     else float("nan")
                 )
-                epoch_text_loss += float(text_loss)
                 epoch_text_ctc_loss += float(text_ctc_loss)
                 epoch_correction_loss += float(correction_loss)
                 epoch_ctc_loss += float(ctc_loss)
@@ -838,7 +816,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
                             f"phase=train batch={batch_index}/{total_train_batches} "
                             f"progress={batch_index / max(total_train_batches, 1) * 100.0:.2f}% "
                             f"loss={float(output.loss.detach().cpu()):.4f} "
-                            f"text_loss={float(text_loss):.4f} "
                             f"text_ctc_loss={float(text_ctc_loss):.4f} "
                             f"correction_loss={float(correction_loss):.4f} "
                             f"bopomofo_ctc_loss={float(ctc_loss):.4f}"
@@ -855,7 +832,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
                     ),
                 )
             train_loss = epoch_loss / max(epoch_batches, 1)
-            train_text_loss = epoch_text_loss / max(epoch_batches, 1)
             train_text_ctc_loss = epoch_text_ctc_loss / max(epoch_batches, 1)
             train_correction_loss = epoch_correction_loss / max(epoch_batches, 1)
             train_ctc_loss = epoch_ctc_loss / max(epoch_batches, 1)
@@ -906,7 +882,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
             epoch_summary_message = (
                 f"epoch={epoch} train_loss={train_loss:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
-                f"val_text_loss={val_metrics['text_loss']:.4f} "
                 f"val_text_ctc_loss={val_metrics['text_ctc_loss']:.4f} "
                 f"val_correction_loss={val_metrics['correction_loss']:.4f} "
                 f"val_bopomofo_ctc_loss={val_metrics['bopomofo_ctc_loss']:.4f} "
@@ -925,8 +900,6 @@ def train(config: dict[str, Any], max_samples: int | None = None) -> Path:
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "val_loss": val_metrics["loss"],
-                    "train_text_loss": train_text_loss,
-                    "val_text_loss": val_metrics["text_loss"],
                     "train_text_ctc_loss": train_text_ctc_loss,
                     "val_text_ctc_loss": val_metrics["text_ctc_loss"],
                     "train_correction_loss": train_correction_loss,
