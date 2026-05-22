@@ -1,0 +1,30 @@
+baselines:
+  - name: whisper_tw
+    enabled: false
+    type: whisper_tw
+    checkpoint:
+    device: cuda
+
+  - name: whisper_medium
+    enabled: true
+    type: hf_whisper
+    model_name_or_path: openai/whisper-medium
+    device: cuda
+
+  - name: whisper_large_v3_turbo
+    enabled: true
+    type: hf_whisper
+    model_name_or_path: openai/whisper-large-v3-turbo
+    device: cuda
+
+  - name: whisper_medium_ft
+    enabled: false
+    type: hf_whisper
+    model_name_or_path: artifacts/baselines/whisper_medium_ft/final
+    device: cuda
+
+  - name: breeze_asr_25
+    enabled: true
+    type: hf_whisper
+    model_name_or_path: MediaTek-Research/Breeze-ASR-25
+    device: cuda

@@ -251,6 +251,7 @@ class WhisperTWModel(nn.Module):
         text_ctc_labels: torch.Tensor | None = None,
         bopomofo_labels: torch.Tensor | None = None,
         bopomofo_label_lengths: torch.Tensor | None = None,
+        compute_corrector: bool = True,
     ) -> WhisperTWOutput:
         encoder_hidden = self.whisper.encoder(input_features).last_hidden_state
         acoustic_states = self.encoder_projection(encoder_hidden)
@@ -273,10 +274,10 @@ class WhisperTWModel(nn.Module):
             target_lengths=bopomofo_label_lengths,
         )
 
-        compressed_states = self.compressor(acoustic_states)
         correction_logits = None
         correction_loss = None
-        if self.context_corrector is not None:
+        if compute_corrector and self.context_corrector is not None:
+            compressed_states = self.compressor(acoustic_states)
             ctc_probs = text_ctc_logits.detach().softmax(dim=-1)
             compressed_probs = _downsample_probabilities(
                 ctc_probs,
@@ -315,9 +316,16 @@ class WhisperTWModel(nn.Module):
         )
 
     @torch.no_grad()
-    def generate_ctc(self, input_features: torch.Tensor, use_corrector: bool = True) -> torch.Tensor:
+    def generate_ctc(
+        self,
+        input_features: torch.Tensor,
+        use_corrector: bool = True,
+    ) -> torch.Tensor:
         self.eval()
-        output = self(input_features=input_features)
+        output = self(
+            input_features=input_features,
+            compute_corrector=use_corrector,
+        )
         logits = (
             output.correction_logits
             if use_corrector and output.correction_logits is not None

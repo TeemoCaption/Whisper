@@ -1,0 +1,42 @@
+base_config: configs/config.yaml
+
+whisper_finetune:
+  model:
+    model_name_or_path: openai/whisper-medium
+    language: zh
+    task: transcribe
+    freeze_encoder: false
+    gradient_checkpointing: true
+
+  data:
+    train_split: train
+    eval_split: dev
+
+  training:
+    output_dir: artifacts/baselines/whisper_medium_ft
+    max_train_samples:
+    max_eval_samples:
+    num_train_epochs: 15.0
+    learning_rate: 1.0e-5
+    warmup_steps: 500
+    per_device_train_batch_size: 4
+    per_device_eval_batch_size: 4
+    gradient_accumulation_steps: 4
+    eval_strategy: steps
+    eval_steps: 500
+    save_steps: 500
+    logging_steps: 25
+    generation_max_length: 192
+    generation_num_beams: 1
+    fp16: true
+    save_total_limit: 2
+    load_best_model_at_end: true
+    metric_for_best_model: cer
+    greater_is_better: false
+    report_to: []
+    dataloader_num_workers: 2
+
+  early_stopping:
+    enabled: true
+    patience: 3
+    threshold: 0.0
