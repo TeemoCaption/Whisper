@@ -157,6 +157,63 @@ def build_compute_metrics(processor, base_config: dict[str, Any]):
     return compute_metrics
 
 
+def get_whisper_encoder(model):
+    if hasattr(model, "model") and hasattr(model.model, "encoder"):
+        return model.model.encoder
+    if hasattr(model, "encoder"):
+        return model.encoder
+    return None
+
+
+def configure_encoder_trainability(
+    model,
+    *,
+    freeze_encoder: bool,
+    unfreeze_last_n_layers: int,
+    train_decoder: bool,
+) -> dict[str, int]:
+    encoder = get_whisper_encoder(model)
+    if freeze_encoder and not train_decoder:
+        for param in model.parameters():
+            param.requires_grad = False
+    if encoder is None:
+        return {
+            "encoder_layers": 0,
+            "unfreeze_encoder_last_n_layers": 0,
+            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+            "total_parameters": sum(p.numel() for p in model.parameters()),
+        }
+
+    if freeze_encoder:
+        for param in encoder.parameters():
+            param.requires_grad = False
+
+    if not train_decoder:
+        decoder = getattr(getattr(model, "model", None), "decoder", None)
+        if decoder is not None:
+            for param in decoder.parameters():
+                param.requires_grad = False
+        projection = getattr(model, "proj_out", None)
+        if projection is not None:
+            for param in projection.parameters():
+                param.requires_grad = False
+
+    layers = getattr(encoder, "layers", None)
+    layer_count = len(layers) if layers is not None else 0
+    requested_layers = max(0, int(unfreeze_last_n_layers))
+    if freeze_encoder and layers is not None and requested_layers > 0:
+        for layer in layers[-requested_layers:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+
+    return {
+        "encoder_layers": layer_count,
+        "unfreeze_encoder_last_n_layers": min(requested_layers, layer_count),
+        "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "total_parameters": sum(p.numel() for p in model.parameters()),
+    }
+
+
 def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_dir: Path):
     kwargs: dict[str, Any] = {
         "output_dir": str(output_dir),
@@ -228,6 +285,10 @@ def main() -> None:
     language = str(model_cfg.get("language") or "zh")
     task = str(model_cfg.get("task") or "transcribe")
     freeze_encoder = bool(model_cfg.get("freeze_encoder", False))
+    unfreeze_encoder_last_n_layers = int(
+        model_cfg.get("unfreeze_encoder_last_n_layers", 0)
+    )
+    train_decoder = bool(model_cfg.get("train_decoder", False))
     gradient_checkpointing = bool(model_cfg.get("gradient_checkpointing", True))
 
     train_split = str(
@@ -253,8 +314,12 @@ def main() -> None:
     model.generation_config.forced_decoder_ids = None
     model.generation_config.suppress_tokens = []
 
-    if freeze_encoder and hasattr(model, "freeze_encoder"):
-        model.freeze_encoder()
+    trainability = configure_encoder_trainability(
+        model,
+        freeze_encoder=freeze_encoder,
+        unfreeze_last_n_layers=unfreeze_encoder_last_n_layers,
+        train_decoder=train_decoder,
+    )
     if gradient_checkpointing:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
@@ -318,6 +383,14 @@ def main() -> None:
                 "eval_samples": len(eval_dataset),
                 "metric_for_best_model": training_args.metric_for_best_model,
                 "load_best_model_at_end": training_args.load_best_model_at_end,
+                "freeze_encoder": freeze_encoder,
+                "train_decoder": train_decoder,
+                "encoder_layers": trainability["encoder_layers"],
+                "unfreeze_encoder_last_n_layers": trainability[
+                    "unfreeze_encoder_last_n_layers"
+                ],
+                "trainable_parameters": trainability["trainable_parameters"],
+                "total_parameters": trainability["total_parameters"],
                 "save_best_to_final": True,
                 "early_stopping": {
                     "enabled": bool(early_stopping_cfg.get("enabled", True)),

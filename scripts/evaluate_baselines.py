@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torchaudio
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
@@ -123,12 +124,53 @@ def default_batch_size(
     return max(1, int(train_cfg.get("eval_batch_size", train_cfg["batch_size"])))
 
 
+def audio_duration_seconds(
+    path: str | Path,
+    *,
+    fallback_sample_rate: int,
+    max_audio_seconds: float,
+) -> float:
+    try:
+        info = torchaudio.info(str(path))
+        if info.sample_rate > 0:
+            duration = float(info.num_frames) / float(info.sample_rate)
+            return min(duration, max_audio_seconds)
+    except Exception:
+        pass
+    waveform = load_audio_waveform(path, fallback_sample_rate)
+    duration = float(waveform.numel()) / float(fallback_sample_rate)
+    return min(duration, max_audio_seconds)
+
+
+def total_audio_seconds_for_split(
+    config: dict[str, Any],
+    split: str,
+    max_samples: int | None,
+) -> float:
+    data_cfg = config["data"]
+    split_source = resolve_common_voice_split_source(data_cfg, split)
+    samples = read_common_voice_split(data_cfg["root"], split_source)
+    if max_samples is not None:
+        samples = samples[:max_samples]
+    sample_rate = int(data_cfg.get("sample_rate", 16000))
+    max_audio_seconds = float(data_cfg.get("max_audio_seconds", 30.0))
+    return sum(
+        audio_duration_seconds(
+            sample.audio_path,
+            fallback_sample_rate=sample_rate,
+            max_audio_seconds=max_audio_seconds,
+        )
+        for sample in samples
+    )
+
+
 def build_result_payload(
     *,
     split: str,
     references: list[str],
     predictions: list[str],
     total_inference_seconds: float,
+    total_audio_seconds: float,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
     samples = len(references)
@@ -138,8 +180,47 @@ def build_result_payload(
         "cer": character_error_rate(predictions, references),
         "inference_seconds": total_inference_seconds,
         "inference_seconds_per_sample": total_inference_seconds / max(samples, 1),
+        "total_audio_seconds": total_audio_seconds,
+        "realtime_factor": (
+            total_inference_seconds / total_audio_seconds
+            if total_audio_seconds > 0.0
+            else None
+        ),
         "elapsed_seconds": elapsed_seconds,
         "seconds_per_sample": elapsed_seconds / max(samples, 1),
+        "records": [
+            {
+                "reference": reference,
+                "prediction": prediction,
+                "char_error_rate": character_error_rate(
+                    [prediction],
+                    [reference],
+                ),
+            }
+            for reference, prediction in zip(references, predictions)
+        ],
+    }
+
+
+def build_error_payload(
+    *,
+    split: str,
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "split": split,
+        "samples": 0,
+        "cer": None,
+        "inference_seconds": 0.0,
+        "inference_seconds_per_sample": None,
+        "total_audio_seconds": 0.0,
+        "realtime_factor": None,
+        "elapsed_seconds": 0.0,
+        "seconds_per_sample": None,
+        "status": "error",
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "records": [],
     }
 
 
@@ -251,6 +332,7 @@ def evaluate_current_model(
         references=references,
         predictions=predictions,
         total_inference_seconds=total_inference_seconds,
+        total_audio_seconds=total_audio_seconds_for_split(config, split, max_samples),
         elapsed_seconds=elapsed_seconds,
     )
 
@@ -467,6 +549,11 @@ def evaluate_hf_whisper(
         references=references,
         predictions=predictions,
         total_inference_seconds=total_inference_seconds,
+        total_audio_seconds=total_audio_seconds_for_split(
+            context.config,
+            context.split,
+            context.max_samples,
+        ),
         elapsed_seconds=elapsed_seconds,
     )
 
@@ -561,6 +648,11 @@ def evaluate_hf_ctc(
         references=references,
         predictions=predictions,
         total_inference_seconds=total_inference_seconds,
+        total_audio_seconds=total_audio_seconds_for_split(
+            context.config,
+            context.split,
+            context.max_samples,
+        ),
         elapsed_seconds=elapsed_seconds,
     )
 
@@ -650,7 +742,15 @@ def main() -> int:
             amp_dtype=get_amp_dtype(train_cfg, baseline_device),
         )
         runner = RUNNER_TYPES[str(baseline_cfg["type"])]
-        payload = runner(baseline_cfg, context)
+        try:
+            payload = runner(baseline_cfg, context)
+        except Exception as exc:
+            payload = build_error_payload(split=args.split, error=exc)
+            print(
+                f"eval_error name={baseline_cfg['name']} "
+                f"type={type(exc).__name__}: {exc}",
+                flush=True,
+            )
         baseline_path = write_eval_json(output_dir, str(baseline_cfg["name"]), payload)
         print(f"eval_json={baseline_path}", flush=True)
 

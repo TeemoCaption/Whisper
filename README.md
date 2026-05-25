@@ -1,6 +1,6 @@
 # Whisper-TW
 
-下載 Common Voice 資料集：
+下載所有已知 Common Voice 資料集。若資料夾已存在，腳本會自動略過並繼續下一份：
 
 ```powershell
 python .\scripts\download_data.py --output-dir .\data
@@ -30,7 +30,7 @@ python .\scripts\evaluate.py --config .\configs\config.yaml --checkpoint .\artif
 python .\scripts\evaluate_baselines.py --config .\configs\config.yaml --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt --baselines-config .\configs\baselines.yaml
 ```
 
-微調 Whisper 基線模型，預設訓練 15 個 epochs，並將驗證集字錯誤率最佳的權重保存成評估可載入格式：
+微調 Whisper 基線模型，預設訓練 10 個 epochs，並將驗證集字錯誤率最佳的權重保存成評估可載入格式：
 
 ```powershell
 python .\scripts\finetune_whisper.py --config .\configs\whisper_finetune.yaml

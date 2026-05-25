@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -14,7 +15,25 @@ from urllib import error, parse, request
 
 DEFAULT_BASE_URL = "https://mozilladatacollective.com/api"
 DEFAULT_DATASET_ID = "cmn2g7eaj01fio10769r1m96n"
+DEFAULT_OUTPUT_ROOT = Path("data")
+DATASET_SPECS = (
+    {
+        "name": "zh-TW",
+        "dataset_id": DEFAULT_DATASET_ID,
+        "output_subdir": "zh-TW",
+    },
+    {
+        "name": "nan-tw",
+        "dataset_id": "cmn2cyd8901jemm0738nubysq",
+        "output_subdir": "nan-tw",
+    },
+)
 CHUNK_SIZE = 1024 * 1024
+STAT_SPLITS = ("train", "dev", "test")
+STAT_SUMMARY_FILENAME = "duration_summary.json"
+STAT_LOG_FILENAME = "duration_summary.log"
+DATASET_RECORD_SEPARATOR = "-" * 72
+AUDIO_STATS_CACHE_FILENAME = "audio_duration_cache.json"
 
 
 class DownloadError(RuntimeError):
@@ -24,12 +43,6 @@ class DownloadError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="透過 Mozilla Data Collective API 下載 Common Voice 資料集。",
-    )
-    parser.add_argument(
-        "dataset_id",
-        nargs="?",
-        default=DEFAULT_DATASET_ID,
-        help="資料集識別碼，預設為 cmn2g7eaj01fio10769r1m96n。",
     )
     parser.add_argument(
         "--api-key",
@@ -42,14 +55,9 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_BASE_URL,
         help="API 基底網址。預設值符合官方文件。",
     )
-    output_group = parser.add_mutually_exclusive_group()
-    output_group.add_argument(
-        "--output-file",
-        help="輸出檔案完整路徑。若未指定，會使用 API 回傳的檔名。",
-    )
-    output_group.add_argument(
+    parser.add_argument(
         "--output-dir",
-        help="輸出資料夾。檔名會使用 API 回傳的檔名。",
+        help="輸出根資料夾。批次模式下會自動建立各資料集子資料夾。",
     )
     parser.add_argument(
         "--overwrite",
@@ -122,20 +130,13 @@ def get_download_info(
 def resolve_output_path(
     info: dict,
     dataset_id: str,
-    output_file: str | None,
-    output_dir: str | None,
+    output_dir: Path,
 ) -> Path:
     filename = info.get("filename") or f"{dataset_id}.tar.gz"
-    if output_file:
-        return Path(output_file)
-    if output_dir:
-        return Path(output_dir) / filename
-    return Path(filename)
+    return output_dir / filename
 
 
-def resolve_extraction_dir(destination: Path, output_dir: str | None) -> Path:
-    if output_dir:
-        return Path(output_dir)
+def resolve_extraction_dir(destination: Path) -> Path:
     return destination.parent
 
 
@@ -394,47 +395,405 @@ def download_or_reuse_archive(
     )
 
 
+def read_cached_duration_summary(target_dir: Path) -> dict | None:
+    summary_path = target_dir / STAT_SUMMARY_FILENAME
+    if not summary_path.exists():
+        return None
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(summary, dict):
+        return None
+    normalized = normalize_cached_summary_paths(target_dir, summary)
+    if normalized != summary:
+        write_duration_summary(target_dir, normalized)
+    return normalized
+
+
+def find_dataset_content_root(target_dir: Path) -> Path:
+    split_names = {f"{split}.tsv" for split in STAT_SPLITS}
+    if any((target_dir / name).exists() for name in split_names):
+        return target_dir
+
+    candidates = sorted(
+        {
+            path.parent
+            for name in split_names
+            for path in target_dir.rglob(name)
+        },
+        key=lambda path: (len(path.relative_to(target_dir).parts), str(path)),
+    )
+    if candidates:
+        return candidates[0]
+    return target_dir
+
+
+def flatten_dataset_root_if_needed(target_dir: Path, expected_root_name: str) -> Path:
+    nested_root = target_dir / expected_root_name
+    if not nested_root.is_dir():
+        return target_dir
+    if any((target_dir / f"{split}.tsv").exists() for split in STAT_SPLITS):
+        return target_dir
+    for item in nested_root.iterdir():
+        destination = target_dir / item.name
+        if destination.exists():
+            continue
+        item.rename(destination)
+    nested_root.rmdir()
+    return target_dir
+
+
+def write_duration_summary(target_dir: Path, summary: dict) -> None:
+    summary_path = target_dir / STAT_SUMMARY_FILENAME
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def resolve_display_name(target_dir: Path, fallback_name: str) -> str:
+    content_root = find_dataset_content_root(target_dir)
+    if content_root != target_dir:
+        return content_root.name
+    return fallback_name
+
+
+def normalize_cached_summary_paths(target_dir: Path, summary: dict) -> dict:
+    normalized = dict(summary)
+    content_root = find_dataset_content_root(target_dir)
+    normalized["dataset_dir"] = str(target_dir)
+    normalized["content_root"] = str(content_root)
+    duration_source = content_root / "clip_durations.tsv"
+    if duration_source.exists():
+        normalized["duration_source"] = str(duration_source)
+    else:
+        normalized["duration_source"] = str(content_root / "clips")
+    return normalized
+
+
+def read_audio_duration_cache(target_dir: Path) -> dict[str, float]:
+    cache_path = target_dir / AUDIO_STATS_CACHE_FILENAME
+    if not cache_path.exists():
+        return {}
+    try:
+        with cache_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    durations = payload.get("durations_seconds")
+    if not isinstance(durations, dict):
+        return {}
+    return {
+        str(key): float(value)
+        for key, value in durations.items()
+        if isinstance(key, str) and isinstance(value, (int, float))
+    }
+
+
+def write_audio_duration_cache(target_dir: Path, durations: dict[str, float]) -> None:
+    cache_path = target_dir / AUDIO_STATS_CACHE_FILENAME
+    payload = {
+        "durations_seconds": durations,
+    }
+    with cache_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def read_split_clip_refs(split_path: Path) -> list[str]:
+    if not split_path.exists():
+        return []
+    with split_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if "path" not in (reader.fieldnames or []):
+            return []
+        return [
+            (row.get("path") or "").strip()
+            for row in reader
+            if (row.get("path") or "").strip()
+        ]
+
+
+def build_clip_split_index(target_dir: Path) -> tuple[dict[str, list[str]], dict[str, int]]:
+    clip_to_splits: dict[str, list[str]] = {}
+    row_counts: dict[str, int] = {}
+    for split in STAT_SPLITS:
+        clips = read_split_clip_refs(target_dir / f"{split}.tsv")
+        row_counts[split] = len(clips)
+        for clip in clips:
+            clip_to_splits.setdefault(clip, []).append(split)
+    return clip_to_splits, row_counts
+
+
+def summarize_from_duration_index(
+    clip_to_splits: dict[str, list[str]],
+    row_counts: dict[str, int],
+    durations_path: Path,
+) -> dict | None:
+    duration_ms = {split: 0 for split in STAT_SPLITS}
+    matched_counts = {split: 0 for split in STAT_SPLITS}
+
+    with durations_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if "clip" not in (reader.fieldnames or []) or "duration[ms]" not in (reader.fieldnames or []):
+            print(f"時長索引欄位不符合預期，改用音檔資訊統計：{durations_path}")
+            return None
+        for row in reader:
+            clip = (row.get("clip") or "").strip()
+            splits = clip_to_splits.get(clip)
+            if not splits:
+                continue
+            try:
+                clip_duration_ms = int(float((row.get("duration[ms]") or "0").strip()))
+            except ValueError:
+                continue
+            for split in splits:
+                duration_ms[split] += clip_duration_ms
+                matched_counts[split] += 1
+
+    return {
+        split: {
+            "clips": row_counts[split],
+            "matched_clips": matched_counts[split],
+            "missing_duration_clips": max(row_counts[split] - matched_counts[split], 0),
+            "seconds": duration_ms[split] / 1000.0,
+            "hours": duration_ms[split] / 1000.0 / 3600.0,
+        }
+        for split in STAT_SPLITS
+    }
+
+
+def summarize_from_audio_files(
+    summary_target_dir: Path,
+    content_root: Path,
+    clip_to_splits: dict[str, list[str]],
+    row_counts: dict[str, int],
+) -> dict:
+    try:
+        import torchaudio
+    except ImportError as exc:
+        raise DownloadError("缺少 torchaudio，無法從音檔中繼資訊統計時長。") from exc
+
+    clips_dir = content_root / "clips"
+    cached_seconds = read_audio_duration_cache(summary_target_dir)
+    duration_seconds = {split: 0.0 for split in STAT_SPLITS}
+    matched_counts = {split: 0 for split in STAT_SPLITS}
+    updated_cache = dict(cached_seconds)
+
+    for clip, splits in clip_to_splits.items():
+        seconds = updated_cache.get(clip)
+        if seconds is None:
+            audio_path = clips_dir / clip
+            if not audio_path.exists():
+                continue
+            info = torchaudio.info(str(audio_path))
+            if not info.sample_rate:
+                continue
+            seconds = float(info.num_frames) / float(info.sample_rate)
+            updated_cache[clip] = seconds
+        for split in splits:
+            duration_seconds[split] += seconds
+            matched_counts[split] += 1
+
+    write_audio_duration_cache(summary_target_dir, updated_cache)
+    return {
+        split: {
+            "clips": row_counts[split],
+            "matched_clips": matched_counts[split],
+            "missing_duration_clips": max(row_counts[split] - matched_counts[split], 0),
+            "seconds": duration_seconds[split],
+            "hours": duration_seconds[split] / 3600.0,
+        }
+        for split in STAT_SPLITS
+    }
+
+
+def summarize_split_durations(target_dir: Path) -> dict | None:
+    content_root = find_dataset_content_root(target_dir)
+
+    clip_to_splits, row_counts = build_clip_split_index(content_root)
+    if not clip_to_splits:
+        print(f"找不到 train/dev/test split，略過時長統計：{target_dir}")
+        return None
+
+    durations_path = content_root / "clip_durations.tsv"
+    splits = None
+    if durations_path.exists():
+        splits = summarize_from_duration_index(clip_to_splits, row_counts, durations_path)
+    if splits is None:
+        splits = summarize_from_audio_files(target_dir, content_root, clip_to_splits, row_counts)
+
+    summary = {
+        "dataset_dir": str(target_dir),
+        "content_root": str(content_root),
+        "duration_source": str(durations_path if durations_path.exists() else content_root / "clips"),
+        "splits": splits,
+    }
+    write_duration_summary(target_dir, summary)
+    return summary
+
+
+def print_duration_summary(dataset_name: str, summary: dict) -> None:
+    print(f"時長統計：{dataset_name}")
+    for split in STAT_SPLITS:
+        item = summary.get("splits", {}).get(split, {})
+        hours = float(item.get("hours", 0.0))
+        clips = int(item.get("clips", 0))
+        missing = int(item.get("missing_duration_clips", 0))
+        warning = f"，缺少時長 {missing} 筆" if missing else ""
+        print(f"  {split}: {hours:.2f} 小時，{clips} 筆{warning}")
+    print(f"  摘要檔：{Path(summary['dataset_dir']) / STAT_SUMMARY_FILENAME}")
+
+
+def report_dataset_duration(dataset_name: str, target_dir: Path) -> None:
+    summary = read_cached_duration_summary(target_dir)
+    if summary is None:
+        summary = summarize_split_durations(target_dir)
+    if summary is not None:
+        print_duration_summary(resolve_display_name(target_dir, dataset_name), summary)
+
+
+def dataset_ready(target_dir: Path) -> bool:
+    if not target_dir.exists():
+        return False
+    content_root = find_dataset_content_root(target_dir)
+    return any((content_root / f"{split}.tsv").exists() for split in STAT_SPLITS)
+
+
+def resolve_output_root(output_dir: str | None) -> Path:
+    if output_dir:
+        return Path(output_dir)
+    return DEFAULT_OUTPUT_ROOT
+
+
+def get_legacy_target_dirs(dataset_spec: dict[str, str], output_root: Path) -> list[Path]:
+    if dataset_spec["dataset_id"] == "cmn2cyd8901jemm0738nubysq":
+        return [output_root / "taigi"]
+    return []
+
+
+def resolve_dataset_target_dir(dataset_spec: dict[str, str], output_root: Path) -> Path:
+    preferred = output_root / dataset_spec["output_subdir"]
+    if preferred.exists():
+        return preferred
+    for legacy_dir in get_legacy_target_dirs(dataset_spec, output_root):
+        if legacy_dir.exists():
+            return legacy_dir
+    return preferred
+
+
+def migrate_dataset_dir(dataset_spec: dict[str, str], output_root: Path) -> Path:
+    preferred = output_root / dataset_spec["output_subdir"]
+    if preferred.exists():
+        return preferred
+    for legacy_dir in get_legacy_target_dirs(dataset_spec, output_root):
+        if legacy_dir.exists():
+            legacy_dir.rename(preferred)
+            return preferred
+    return preferred
+
+
+def append_duration_log(log_path: Path, dataset_name: str, summary: dict) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(f"{DATASET_RECORD_SEPARATOR}\n")
+        f.write(f"dataset: {dataset_name}\n")
+        f.write(f"dataset_dir: {summary.get('dataset_dir', '')}\n")
+        f.write(f"duration_source: {summary.get('duration_source', '')}\n")
+        for split in STAT_SPLITS:
+            item = summary.get("splits", {}).get(split, {})
+            f.write(
+                f"{split}: {float(item.get('hours', 0.0)):.4f} hours, "
+                f"{int(item.get('clips', 0))} clips, "
+                f"{int(item.get('missing_duration_clips', 0))} missing_duration\n"
+            )
+        f.write("\n")
+
+
+def download_dataset(
+    dataset_spec: dict[str, str],
+    api_key: str | None,
+    base_url: str,
+    output_root: Path,
+    timeout: int,
+    overwrite: bool,
+    duration_log_path: Path,
+) -> Path | None:
+    target_dir = migrate_dataset_dir(dataset_spec, output_root)
+    flatten_dataset_root_if_needed(target_dir, dataset_spec["output_subdir"])
+    if dataset_ready(target_dir) and not overwrite:
+        print(f"已存在資料集，略過：{resolve_display_name(target_dir, dataset_spec['name'])} ({target_dir})")
+        report_dataset_duration(dataset_spec["name"], target_dir)
+        summary = read_cached_duration_summary(target_dir)
+        if summary is not None:
+            append_duration_log(duration_log_path, resolve_display_name(target_dir, dataset_spec["name"]), summary)
+        return None
+
+    resolved_api_key = resolve_api_key(api_key)
+    info = get_download_info(base_url, dataset_spec["dataset_id"], resolved_api_key, timeout)
+    download_url = info["downloadUrl"]
+    expected_size = info.get("sizeBytes")
+    if isinstance(expected_size, str) and expected_size.isdigit():
+        expected_size = int(expected_size)
+    elif not isinstance(expected_size, int):
+        expected_size = None
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    destination = resolve_output_path(
+        info,
+        dataset_spec["dataset_id"],
+        target_dir,
+    )
+
+    print(f"資料集：{resolve_display_name(target_dir, dataset_spec['name'])}")
+    print(f"輸出位置：{destination}")
+    if expected_size is not None:
+        print(f"預估大小：{format_size(expected_size)}")
+
+    download_or_reuse_archive(
+        download_url=download_url,
+        destination=destination,
+        expected_size=expected_size,
+        expected_checksum=info.get("checksum"),
+        timeout=timeout,
+        overwrite=overwrite,
+    )
+
+    extraction_dir = resolve_extraction_dir(destination)
+    extract_archive(destination, extraction_dir, overwrite)
+    print(f"完成：{extraction_dir}")
+    report_dataset_duration(dataset_spec["name"], extraction_dir)
+    summary = read_cached_duration_summary(extraction_dir)
+    if summary is not None:
+        append_duration_log(duration_log_path, resolve_display_name(extraction_dir, dataset_spec["name"]), summary)
+    return extraction_dir
+
+
 def main() -> int:
     args = parse_args()
 
     try:
-        api_key = resolve_api_key(args.api_key)
-        info = get_download_info(args.base_url, args.dataset_id, api_key, args.timeout)
-        download_url = info["downloadUrl"]
-        expected_size = info.get("sizeBytes")
-        if isinstance(expected_size, str) and expected_size.isdigit():
-            expected_size = int(expected_size)
-        elif not isinstance(expected_size, int):
-            expected_size = None
-
-        destination = resolve_output_path(
-            info,
-            args.dataset_id,
-            args.output_file,
-            args.output_dir,
-        )
-
-        print(f"資料集：{info.get('filename', args.dataset_id)}")
-        print(f"輸出位置：{destination}")
-        if expected_size is not None:
-            print(f"預估大小：{format_size(expected_size)}")
-
-        download_or_reuse_archive(
-            download_url=download_url,
-            destination=destination,
-            expected_size=expected_size,
-            expected_checksum=info.get("checksum"),
-            timeout=args.timeout,
-            overwrite=args.overwrite,
-        )
-
-        extraction_dir = resolve_extraction_dir(destination, args.output_dir)
-        extract_archive(destination, extraction_dir, args.overwrite)
+        output_root = resolve_output_root(args.output_dir)
+        duration_log_path = output_root / STAT_LOG_FILENAME
+        if duration_log_path.exists():
+            duration_log_path.unlink()
+        for index, dataset_spec in enumerate(DATASET_SPECS):
+            if index > 0:
+                print(f"\n{DATASET_RECORD_SEPARATOR}")
+            download_dataset(
+                dataset_spec=dataset_spec,
+                api_key=args.api_key,
+                base_url=args.base_url,
+                output_root=output_root,
+                timeout=args.timeout,
+                overwrite=args.overwrite,
+                duration_log_path=duration_log_path,
+            )
     except DownloadError as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
 
-    print(f"完成：{extraction_dir}")
     return 0
 
 

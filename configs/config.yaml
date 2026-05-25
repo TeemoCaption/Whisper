@@ -45,7 +45,7 @@ character_vocab:
 model:
   whisper_name: openai/whisper-medium
   freeze_whisper_encoder: true
-  unfreeze_encoder_last_n_layers: 0
+  unfreeze_encoder_last_n_layers: 6
 
   bopomofo_ctc:
     enabled: true
@@ -114,15 +114,15 @@ training:
   log_every: 10
   output_dir: artifacts/checkpoints
   device: cuda
-  checkpoint_monitor: val_correction_loss
+  checkpoint_monitor: val_text_ctc_loss
   early_stopping:
     enabled: true
-    monitor: val_correction_loss
+    monitor: val_text_ctc_loss
     patience: 4
     min_delta: 0.005
   scheduler:
     type: warmup_reduce_on_plateau
-    monitor: val_correction_loss
+    monitor: val_text_ctc_loss
     warmup_epochs: 3
     warmup_start_factor: 0.1
     factor: 0.5
