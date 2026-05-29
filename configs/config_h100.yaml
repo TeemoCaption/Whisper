@@ -13,8 +13,7 @@ whisper_train:
   peft:
     enabled: true
     method: adalora
-    adapter_scope: shared
-    adapter_name: shared
+    adapter_scope: language
     active_adapter:
     active_language:
     language_adapters:
@@ -69,27 +68,14 @@ whisper_train:
       remove_punctuation: false
       remove_whitespace: true
 
-  routing:
-    enabled: true
-    labels: [zh-TW, nan-tw]
-    high_confidence_threshold: 0.75
-    low_confidence_threshold: 0.55
-    mid_top_k: 2
-    shared_adapter_name: shared
-    adapters:
-      zh-TW: zh_tw
-      nan-tw: nan_tw
-    target_languages:
-      zh-TW: zh-TW
-      nan-tw: nan-tw
-
   training:
     # H100 建議設定：模型與低秩方法不變，只提高吞吐。
-    output_dir: artifacts/models/whisper_medium_lora_h100
+    output_dir: artifacts/models/whisper_medium_adalora_h100
     max_train_samples:
     max_eval_samples:
     num_train_epochs: 10.0
     learning_rate: 1.0e-5
+    lr_scheduler_type: linear
     warmup_steps: 500
     per_device_train_batch_size: 16
     per_device_eval_batch_size: 16
@@ -109,10 +95,51 @@ whisper_train:
     report_to:
       - wandb
     wandb_project: whisper-tw
-    run_name: whisper-medium-lora-h100
+    run_name: whisper-medium-adalora-h100
     wandb_log_model: false
     dataloader_num_workers: 4
     disable_tqdm: false
+
+  language_classifier:
+    enabled: true
+    labels:
+      - zh-TW
+      - nan-tw
+    output_dir: artifacts/models/language_classifier_h100
+    train_split: train
+    eval_split: dev
+    test_split: test
+    max_train_samples:
+    max_eval_samples:
+    max_test_samples:
+    num_train_epochs: 10.0
+    learning_rate: 1.0e-4
+    warmup_steps: 100
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    pooling: mean_max
+    hidden_ratio: 0.5
+    num_hidden_layers: 2
+    dropout: 0.1
+    per_device_train_batch_size: 32
+    per_device_eval_batch_size: 32
+    dataloader_num_workers: 4
+    dataloader_pin_memory: true
+    dataloader_persistent_workers: true
+    fp16: false
+    bf16: true
+    tf32: true
+    logging_steps: 25
+    disable_tqdm: false
+    early_stopping:
+      enabled: true
+      patience: 3
+      min_delta: 0.0
+      metric: macro_f1
+    report_to:
+      - wandb
+    wandb_project: whisper-tw
+    run_name: whisper-medium-language-head-h100
 
   early_stopping:
     enabled: true

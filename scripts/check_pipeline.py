@@ -2,12 +2,13 @@
 """靜態檢查 Whisper-medium 雙語低秩適應流程。
 
 這個檢查不下載模型、不讀取真實音訊內容，只驗證目前程式碼與設定是否
-能支撐 zh-TW -> 華語文字、nan-tw -> 台語文字的前處理與路由設計。
+能支撐 zh-TW -> 華語文字、nan-tw -> 台語文字的前處理與語言分類設計。
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import sys
@@ -20,9 +21,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.check_cv import inspect_split
-from scripts.lora_adapters import activate_routed_adapters, build_peft_config
+from scripts.lora_adapters import build_peft_config
 from scripts.prepare_cv import prepare_datasets
-from scripts.route_confidence import build_routing_config, route_adapters
+from scripts.train import apply_language_training_override
 from whisper_tw.config import load_config
 from whisper_tw.data import read_common_voice_split
 
@@ -111,15 +112,16 @@ def build_tiny_common_voice_tree(root: Path) -> None:
 
 def validate_configs(failures: list[str]) -> None:
     requirements = read_text(ROOT / "requirements.txt")
-    baseline_cfg = read_text(ROOT / "configs" / "baseline.yaml")
     lora_cfg = read_text(ROOT / "configs" / "config.yaml")
     lora_h100_cfg = read_text(ROOT / "configs" / "config_h100.yaml")
-    docs = read_text(ROOT / "docs" / "lora_confidence_method.md")
-    lora = load_config(ROOT / "configs" / "config.yaml")["whisper_train"]
-    lora_h100 = load_config(ROOT / "configs" / "config_h100.yaml")["whisper_train"]
+    docs = read_text(ROOT / "docs" / "language_adalora_method.md")
+    config_8gb = load_config(ROOT / "configs" / "config.yaml")
+    config_h100 = load_config(ROOT / "configs" / "config_h100.yaml")
+    lora = config_8gb["whisper_train"]
+    lora_h100 = config_h100["whisper_train"]
 
     require("peft" in requirements, "requirements.txt 缺少 peft 依賴。", failures)
-    train_script = read_text(ROOT / "scripts" / "train_baseline.py")
+    train_script = read_text(ROOT / "scripts" / "train.py")
     require(
         "def on_pre_optimizer_step" in train_script,
         "AdaLoRA 秩分配應在最佳化器更新前執行，避免梯度已清空。",
@@ -132,24 +134,8 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
-        "model_name_or_path: openai/whisper-medium" in baseline_cfg,
-        "baseline.yaml 未固定 Whisper-medium。",
-        failures,
-    )
-    require(
-        "peft:" not in baseline_cfg,
-        "baseline.yaml 不應啟用低秩適應，這份應是純基線。",
-        failures,
-    )
-    baseline = load_config(ROOT / "configs" / "baseline.yaml")["whisper_baseline"]
-    require(
-        baseline.get("training", {}).get("disable_tqdm") is False,
-        "baseline.yaml 未明確開啟訓練進度條。",
-        failures,
-    )
-    require(
-        baseline.get("model", {}).get("gradient_checkpointing_use_reentrant") is False,
-        "baseline.yaml 應使用非重入梯度檢查點，避免凍結 Whisper 時梯度中斷。",
+        "whisper_baseline" not in config_8gb and "whisper_baseline" not in config_h100,
+        "訓練設定不應再保留 whisper_baseline 區塊。",
         failures,
     )
     require(
@@ -167,26 +153,111 @@ def validate_configs(failures: list[str]) -> None:
     require("lora:" in lora_cfg, "config.yaml 缺少 lora 固定秩對照設定。", failures)
     require("adalora:" in lora_cfg, "config.yaml 缺少 adalora 設定。", failures)
     require("adapter_scope:" in lora_cfg, "config.yaml 缺少 adapter_scope。", failures)
+    require(
+        lora.get("peft", {}).get("adapter_scope") == "language",
+        "config.yaml 應作為語言專屬 adapter 的共用基底，而不是 shared adapter 訓練目標。",
+        failures,
+    )
+    require(
+        not lora.get("peft", {}).get("active_language"),
+        "config.yaml 共用基底不應直接指定 active_language。",
+        failures,
+    )
     require("zh-TW: zh_tw" in lora_cfg, "config.yaml 缺少 zh-TW adapter。", failures)
     require("nan-tw: nan_tw" in lora_cfg, "config.yaml 缺少 nan-tw adapter。", failures)
+    require(
+        not (ROOT / "configs" / "baseline.yaml").exists(),
+        "不應再保留 baseline.yaml。",
+        failures,
+    )
+    require(
+        not (ROOT / "configs" / "config_zh_tw.yaml").exists(),
+        "不應再保留 config_zh_tw.yaml；語言請由 --language 指定。",
+        failures,
+    )
+    require(
+        not (ROOT / "configs" / "config_nan_tw.yaml").exists(),
+        "不應再保留 config_nan_tw.yaml；語言請由 --language 指定。",
+        failures,
+    )
+    for expected_language in ("zh-TW", "nan-tw"):
+        train_cfg = copy.deepcopy(lora)
+        adapter_name = apply_language_training_override(train_cfg, expected_language)
+        require(
+            train_cfg.get("peft", {}).get("active_language") == expected_language,
+            f"--language {expected_language} 未正確設定 active_language。",
+            failures,
+        )
+        require(
+            train_cfg.get("data", {}).get("language_filter") == expected_language,
+            f"--language {expected_language} 未正確限制訓練語言。",
+            failures,
+        )
+        require(
+            bool(adapter_name) and adapter_name in str(train_cfg.get("training", {}).get("output_dir")),
+            f"--language {expected_language} 未產生語言專屬輸出資料夾。",
+            failures,
+        )
     require(
         "train_tsv: data/processed/common_voice/train.tsv" in lora_cfg,
         "config.yaml 未指向前處理後 train.tsv。",
         failures,
     )
     require("remove_punctuation: false" in lora_cfg, "config.yaml 可能會清掉台語標記符號。", failures)
-    require("adalora" in docs, "方法文件未對齊自適應低秩適應。", failures)
+    require("adalora" in docs.lower(), "方法文件未對齊自適應低秩適應。", failures)
     require("adapter_scope: language" in docs, "方法文件未對齊語言專屬 adapter。", failures)
-    require("信心" in docs, "方法文件缺少信心閥值說明。", failures)
-    for key in ("model", "peft", "data", "routing"):
+    require("AdaLoRA" in docs, "方法文件未說明自適應低秩容量分配。", failures)
+    require("語言分類頭" in docs, "方法文件未說明語言分類頭設計。", failures)
+    require("信心閥值" in docs, "方法文件應明確說明不採用信心閥值路由。", failures)
+    require(
+        "language_classifier:" in lora_cfg,
+        "config.yaml 缺少語言分類頭設定。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("num_hidden_layers") == 2,
+        "config.yaml 語言分類頭應使用兩層 MLP。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("num_train_epochs") == 10.0,
+        "config.yaml 語言分類頭應訓練 10 epochs。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("early_stopping", {}).get("enabled") is True,
+        "config.yaml 語言分類頭應啟用早停。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("test_split") == "test",
+        "config.yaml 語言分類頭應設定 test_split 以輸出最終混淆矩陣。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("pooling") == "mean_max",
+        "config.yaml 語言分類頭應使用 mean_max 池化。",
+        failures,
+    )
+    for key in ("model", "peft", "data"):
         require(
             lora.get(key) == lora_h100.get(key),
             f"8GB 與 H100 低秩訓練的 {key} 設定不一致。",
             failures,
         )
     require(
-        lora.get("training", {}).get("per_device_train_batch_size") == 1,
-        "config.yaml 不是 8GB 小批次設定。",
+        lora.get("training", {}).get("per_device_train_batch_size") == 4,
+        "config.yaml 不是 8GB 加速批次設定。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("lr_scheduler_type") == "linear",
+        "config.yaml 未明確設定線性學習率排程。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("gradient_accumulation_steps") == 4,
+        "config.yaml 不是 8GB 加速梯度累積設定。",
         failures,
     )
     require(
@@ -197,11 +268,6 @@ def validate_configs(failures: list[str]) -> None:
     require(
         lora.get("training", {}).get("logging_steps") >= 100,
         "config.yaml 的紀錄頻率過高，會增加 CPU 與 wandb 負擔。",
-        failures,
-    )
-    require(
-        lora.get("training", {}).get("disable_tqdm") is True,
-        "config.yaml 8GB 低 CPU 設定應關閉 tqdm 終端進度條。",
         failures,
     )
     require(
@@ -230,8 +296,28 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
+        lora.get("training", {}).get("dataloader_num_workers") == 1,
+        "config.yaml 8GB 設定應使用 1 個資料載入 worker 提高 GPU 餵資料速度。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("dataloader_pin_memory") is True,
+        "config.yaml 8GB 設定應啟用 pin memory 加速資料搬移。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("tf32") is True,
+        "config.yaml 8GB 設定應啟用 TF32 提高 NVIDIA GPU 訓練速度。",
+        failures,
+    )
+    require(
         lora_h100.get("training", {}).get("bf16") is True,
         "H100 設定未啟用 bf16。",
+        failures,
+    )
+    require(
+        lora_h100.get("training", {}).get("lr_scheduler_type") == "linear",
+        "config_h100.yaml 未明確設定線性學習率排程。",
         failures,
     )
     for label, cfg in (
@@ -249,13 +335,37 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
-        "scripts\\train_baseline.py" in read_text(ROOT / "README.md"),
-        "README.md 缺少基線訓練腳本指令。",
+        "scripts\\train.py" in read_text(ROOT / "README.md")
+        or "scripts/train.py" in read_text(ROOT / "README.md"),
+        "README.md 缺少主訓練腳本指令。",
+        failures,
+    )
+    readme = read_text(ROOT / "README.md")
+    require(
+        "--language zh-TW" in readme
+        and "--language nan-tw" in readme,
+        "README.md 缺少語言專屬 AdaLoRA 訓練指令。",
         failures,
     )
     require(
-        "scripts\\train_lora.py" in read_text(ROOT / "README.md"),
-        "README.md 缺少低秩適應訓練腳本指令。",
+        "configs\\config_zh_tw.yaml" not in readme
+        and "configs\\config_nan_tw.yaml" not in readme,
+        "README.md 不應再引用語言專屬設定檔。",
+        failures,
+    )
+    require(
+        "train_lang_classifier.py" in readme,
+        "README.md 缺少語言分類頭訓練指令。",
+        failures,
+    )
+    require(
+        "configs\\baseline.yaml" not in readme and "configs/baseline.yaml" not in readme,
+        "README.md 不應再引用 baseline.yaml。",
+        failures,
+    )
+    require(
+        "train_baseline.py" not in readme and "train_lora.py" not in readme,
+        "README.md 不應再引用舊訓練腳本名稱。",
         failures,
     )
 
@@ -398,45 +508,6 @@ def validate_real_prepared_data(
     return report
 
 
-class FakePeftModel:
-    def __init__(self) -> None:
-        self.active_adapter = ""
-
-    def set_adapter(self, name: str) -> None:
-        self.active_adapter = name
-
-
-def validate_routing(failures: list[str]) -> dict:
-    project_config = load_config(ROOT / "configs" / "config.yaml")
-    routing_config = build_routing_config(project_config)
-    high = route_adapters({"zh-TW": 0.9, "nan-tw": 0.1}, config=routing_config)
-    middle = route_adapters({"zh-TW": 0.62, "nan-tw": 0.38}, config=routing_config)
-    low = route_adapters(
-        {"zh-TW": 0.51, "nan-tw": 0.49},
-        config=routing_config,
-        target_language="nan-tw",
-    )
-
-    require(high.routing_mode == "single", "高信心未使用單一 adapter。", failures)
-    require(middle.routing_mode == "mixed", "中信心未使用混合 adapter。", failures)
-    require(low.routing_mode == "shared", "低信心未使用共享 adapter。", failures)
-    require(low.target_language == "nan-tw", "低信心時錯誤改變 nan-tw 目標語言。", failures)
-
-    fake_model = FakePeftModel()
-    activation = activate_routed_adapters(fake_model, high)
-    require(
-        fake_model.active_adapter == "zh_tw",
-        "路由結果無法實際切換 adapter。",
-        failures,
-    )
-    return {
-        "high": high.to_dict(),
-        "middle": middle.to_dict(),
-        "low": low.to_dict(),
-        "activation": activation,
-    }
-
-
 def validate_peft_config(failures: list[str]) -> dict:
     project_config = load_config(ROOT / "configs" / "config.yaml")
     peft_cfg = project_config["whisper_train"]["peft"]
@@ -466,7 +537,6 @@ def main() -> int:
         splits=list(args.splits),
         require_real_data=bool(args.require_real_data),
     )
-    routing_report = validate_routing(failures)
     peft_report = validate_peft_config(failures)
 
     report = {
@@ -474,7 +544,6 @@ def main() -> int:
         "failures": failures,
         "preprocessing": preprocessing_report,
         "real_data": real_data_report,
-        "routing": routing_report,
         "peft": peft_report,
     }
     if args.json:

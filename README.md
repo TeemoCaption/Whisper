@@ -5,7 +5,7 @@
 - `zh-TW` 音訊辨識成中文文字
 - `nan-tw` 音訊辨識成台語文字
 
-若後續整合雙語資料或語言切換機制，方向是同一模型內根據語言信心或語言判別結果，決定輸出中文或台語辨識結果；不是把台語音訊轉成華語文字。
+若後續整合雙語資料或語言切換機制，方向是同一模型內先做語言判別，再選擇對應語言 adapter；不是把台語音訊轉成華語文字。
 
 建立乾淨 Conda 環境：
 
@@ -53,30 +53,29 @@ python .\scripts\check_cv.py --prepared-dir .\data\processed\common_voice --data
 wandb login
 ```
 
-訓練 Whisper-medium 基線模型。這個入口不啟用低秩適應，用來產生比較用基線：
+訓練語言分類頭。分類頭會使用凍結的 Whisper encoder 表示，推論時用來選擇 `zh-TW` 或 `nan-tw` adapter：
 
 ```powershell
-python .\scripts\train_baseline.py --config .\configs\baseline.yaml
+python .\scripts\train_lang_classifier.py --config .\configs\config.yaml
 ```
 
-訓練 Whisper-medium 低秩適應模型。這個入口用於論文方法改良，預設使用自適應低秩；若要做固定秩對照，可在 `configs/config.yaml` 的 `whisper_train.peft.method` 改成 `lora`：
+分類頭訓練中不畫圖；訓練結束後會用最佳分類頭輸出 test 混淆矩陣圖。
+
+訓練語言專屬 AdaLoRA adapter。這個流程對齊 LoRA-Whisper 的多語言擴充方式，但每個語言 adapter 使用 AdaLoRA 動態分配容量：
 
 ```powershell
-python .\scripts\train_lora.py --config .\configs\config.yaml
+python .\scripts\train.py --config .\configs\config.yaml --language zh-TW
+python .\scripts\train.py --config .\configs\config.yaml --language nan-tw
 ```
 
-`configs/config.yaml` 是 8GB VRAM 版本；`configs/config_h100.yaml` 使用相同模型與低秩方法，只提高資源相關設定：
+訓練用 YAML 只保留 `configs/config.yaml` 與 `configs/config_h100.yaml`。語言差異由 `--language` 指定，不再使用多份語言設定檔。
+
+H100 / Linux 指令：
 
 ```bash
-python scripts/train_lora.py --config configs/config_h100.yaml
-```
-
-若要訓練語言專屬轉接模組，將 `configs/config.yaml` 的 `adapter_scope` 改成 `language` 並設定 `active_language` 為 `zh-TW` 或 `nan-tw`。
-
-信心閥值路由可先用自我檢查確認：
-
-```powershell
-python .\scripts\route_confidence.py --self-test
+python scripts/train_lang_classifier.py --config configs/config_h100.yaml
+python scripts/train.py --config configs/config_h100.yaml --language zh-TW
+python scripts/train.py --config configs/config_h100.yaml --language nan-tw
 ```
 
 整體流程靜態總檢查：

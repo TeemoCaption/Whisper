@@ -10,3 +10,4 @@ wandb
 tqdm
 librosa>=0.10.0
 soundfile>=0.12.1
+matplotlib>=3.8.0

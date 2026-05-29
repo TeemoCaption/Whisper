@@ -31,7 +31,12 @@ def resolve_adapter_names(peft_cfg: dict[str, Any]) -> dict[str, Any]:
 
     active_language = peft_cfg.get("active_language")
     active_adapter = peft_cfg.get("active_adapter")
-    if scope == "language" and active_language:
+    if scope == "language":
+        if not active_language:
+            raise ValueError(
+                "peft.adapter_scope=language 時必須設定 peft.active_language；"
+                "請在低秩訓練指令加入 --language zh-TW 或 --language nan-tw。"
+            )
         try:
             active_name = language_adapters[str(active_language)]
         except KeyError as exc:
@@ -203,64 +208,3 @@ def save_peft_artifacts(model, final_dir: Path, peft_info: dict[str, Any]) -> No
         encoding="utf-8",
     )
 
-
-def _decision_value(decision: Any, key: str, default: Any = None) -> Any:
-    if isinstance(decision, dict):
-        return decision.get(key, default)
-    return getattr(decision, key, default)
-
-
-def activate_routed_adapters(
-    model,
-    decision: Any,
-    *,
-    mixed_adapter_name: str = "confidence_mixed",
-    combination_type: str = "linear",
-) -> dict[str, Any]:
-    adapter_names = [
-        sanitize_adapter_name(name)
-        for name in _decision_value(decision, "adapter_names", [])
-    ]
-    weights = [float(value) for value in _decision_value(decision, "weights", [])]
-    routing_mode = str(_decision_value(decision, "routing_mode", "single"))
-
-    if not adapter_names:
-        raise ValueError("路由結果缺少 adapter_names。")
-    if not weights:
-        weights = [1.0 / len(adapter_names)] * len(adapter_names)
-    if len(adapter_names) != len(weights):
-        raise ValueError("路由結果的 adapter_names 與 weights 長度不一致。")
-
-    if len(adapter_names) == 1 or routing_mode in {"single", "shared"}:
-        model.set_adapter(adapter_names[0])
-        return {
-            "active_adapter": adapter_names[0],
-            "adapter_names": adapter_names,
-            "weights": weights,
-            "routing_mode": routing_mode,
-            "mixed": False,
-        }
-
-    if not hasattr(model, "add_weighted_adapter"):
-        raise RuntimeError("目前模型不支援加權混合 adapter；請改用單一或共享路由。")
-
-    mixed_name = sanitize_adapter_name(mixed_adapter_name)
-    if hasattr(model, "delete_adapter"):
-        try:
-            model.delete_adapter(mixed_name)
-        except Exception:
-            pass
-    model.add_weighted_adapter(
-        adapter_names,
-        weights,
-        mixed_name,
-        combination_type=combination_type,
-    )
-    model.set_adapter(mixed_name)
-    return {
-        "active_adapter": mixed_name,
-        "adapter_names": adapter_names,
-        "weights": weights,
-        "routing_mode": routing_mode,
-        "mixed": True,
-    }

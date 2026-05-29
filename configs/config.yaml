@@ -14,9 +14,8 @@ whisper_train:
     enabled: true
     # 預設使用 adalora 對應自適應低秩適應；可切回 lora 做固定秩基線。
     method: adalora
-    # shared 是單一共享轉接模組基線；language 是每語言一組轉接模組。
-    adapter_scope: shared
-    adapter_name: shared
+    # language 是每語言一組轉接模組；本檔作為語言 adapter 共用基底。
+    adapter_scope: language
     active_adapter:
     active_language:
     language_adapters:
@@ -71,31 +70,18 @@ whisper_train:
       remove_punctuation: false
       remove_whitespace: true
 
-  routing:
-    enabled: true
-    labels: [zh-TW, nan-tw]
-    high_confidence_threshold: 0.75
-    low_confidence_threshold: 0.55
-    mid_top_k: 2
-    shared_adapter_name: shared
-    adapters:
-      zh-TW: zh_tw
-      nan-tw: nan_tw
-    target_languages:
-      zh-TW: zh-TW
-      nan-tw: nan-tw
-
   training:
     # 8GB VRAM 預設：降低單步批次，靠梯度累積維持有效批次。
-    output_dir: artifacts/models/whisper_medium_lora_8gb
+    output_dir: artifacts/models/whisper_medium_adalora_8gb
     max_train_samples:
     max_eval_samples: 1000
-    num_train_epochs: 10.0
+    num_train_epochs: 20.0
     learning_rate: 1.0e-5
+    lr_scheduler_type: linear
     warmup_steps: 500
-    per_device_train_batch_size: 1
+    per_device_train_batch_size: 4
     per_device_eval_batch_size: 1
-    gradient_accumulation_steps: 16
+    gradient_accumulation_steps: 4
     eval_strategy: steps
     eval_steps: 1000
     save_steps: 1000
@@ -115,11 +101,56 @@ whisper_train:
     report_to:
       - wandb
     wandb_project: whisper-tw
-    run_name: whisper-medium-lora-8gb
+    run_name: whisper-medium-adalora-8gb
     wandb_log_model: false
-    dataloader_num_workers: 0
-    disable_tqdm: true
+    dataloader_num_workers: 1
+    dataloader_pin_memory: true
+    dataloader_persistent_workers: true
+    dataloader_prefetch_factor: 2
+    tf32: true
+    disable_tqdm: false
     warmup_first_batch: true
+
+  language_classifier:
+    enabled: true
+    labels:
+      - zh-TW
+      - nan-tw
+    output_dir: artifacts/models/language_classifier_8gb
+    train_split: train
+    eval_split: dev
+    test_split: test
+    max_train_samples:
+    max_eval_samples: 2000
+    max_test_samples:
+    num_train_epochs: 10.0
+    learning_rate: 1.0e-4
+    warmup_steps: 100
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    pooling: mean_max
+    hidden_ratio: 0.5
+    num_hidden_layers: 2
+    dropout: 0.1
+    per_device_train_batch_size: 4
+    per_device_eval_batch_size: 4
+    dataloader_num_workers: 1
+    dataloader_pin_memory: true
+    dataloader_persistent_workers: true
+    fp16: true
+    bf16: false
+    tf32: true
+    logging_steps: 25
+    disable_tqdm: false
+    early_stopping:
+      enabled: true
+      patience: 3
+      min_delta: 0.0
+      metric: macro_f1
+    report_to:
+      - wandb
+    wandb_project: whisper-tw
+    run_name: whisper-medium-language-head-8gb
 
   early_stopping:
     enabled: true

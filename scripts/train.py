@@ -25,6 +25,7 @@ try:
         apply_peft_adapters,
         count_parameters,
         is_peft_enabled,
+        sanitize_adapter_name,
         save_peft_artifacts,
         update_adalora_rank_allocation,
     )
@@ -33,6 +34,7 @@ except ImportError:
         apply_peft_adapters,
         count_parameters,
         is_peft_enabled,
+        sanitize_adapter_name,
         save_peft_artifacts,
         update_adalora_rank_allocation,
     )
@@ -40,8 +42,9 @@ except ImportError:
 
 def parse_args(
     *,
-    default_config: str = "configs/baseline.yaml",
-    description: str = "訓練 Whisper-medium 基線模型。",
+    default_config: str = "configs/config.yaml",
+    description: str = "訓練 Whisper-medium 語言專屬 AdaLoRA 模型。",
+    include_language_arg: bool = True,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
@@ -49,6 +52,12 @@ def parse_args(
         default=default_config,
         help="Whisper 訓練設定檔路徑。",
     )
+    if include_language_arg:
+        parser.add_argument(
+            "--language",
+            required=True,
+            help="訓練語言專屬 adapter，例如 zh-TW 或 nan-tw。",
+        )
     return parser.parse_args()
 
 
@@ -74,8 +83,34 @@ def get_whisper_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
     section = config.get("whisper_train")
     if isinstance(section, dict):
         return section
-    section = config.get("whisper_baseline")
-    if isinstance(section, dict):
+    return {}
+
+
+def deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def get_merged_experiment_config(
+    config: dict[str, Any],
+    base_config: dict[str, Any],
+    experiment_key: str | None = None,
+) -> dict[str, Any]:
+    keys = (experiment_key,) if experiment_key else ("whisper_train",)
+    for key in keys:
+        if not key:
+            continue
+        section = config.get(key)
+        if not isinstance(section, dict):
+            continue
+        base_section = base_config.get(key)
+        if isinstance(base_section, dict) and config.get("base_config"):
+            return deep_merge_dict(base_section, section)
         return section
     return {}
 
@@ -91,12 +126,85 @@ def get_data_config(config: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def resolve_output_dir(config: dict[str, Any], model_name_or_path: str) -> Path:
-    experiment_cfg = get_whisper_experiment_config(config)
+def resolve_training_output_dir(
+    experiment_cfg: dict[str, Any],
+    model_name_or_path: str,
+) -> Path:
     output_dir = get_nested(experiment_cfg, "training", "output_dir")
     if output_dir:
         return Path(str(output_dir))
-    return Path("artifacts") / "baselines" / f"{sanitize_model_name(model_name_or_path)}_ft"
+    return Path("artifacts") / "models" / f"{sanitize_model_name(model_name_or_path)}_adalora"
+
+
+def resolve_output_dir(config: dict[str, Any], model_name_or_path: str) -> Path:
+    return resolve_training_output_dir(
+        get_whisper_experiment_config(config),
+        model_name_or_path,
+    )
+
+
+def _training_profile_name(output_dir: Path) -> str:
+    name = output_dir.name.lower()
+    if "h100" in name:
+        return "h100"
+    if "8gb" in name:
+        return "8gb"
+    return "local"
+
+
+def apply_language_training_override(
+    train_cfg: dict[str, Any],
+    language: str | None,
+) -> str | None:
+    if language in (None, ""):
+        return None
+
+    selected_language = str(language)
+    peft_cfg = train_cfg.setdefault("peft", {})
+    language_adapters = {
+        str(key): sanitize_adapter_name(str(value))
+        for key, value in dict(peft_cfg.get("language_adapters") or {}).items()
+    }
+    if selected_language not in language_adapters:
+        available = ", ".join(language_adapters) or "未設定"
+        raise ValueError(
+            f"--language={selected_language!r} 沒有對應 adapter；可用語言: {available}。"
+        )
+
+    adapter_name = language_adapters[selected_language]
+    peft_cfg["adapter_scope"] = "language"
+    peft_cfg["active_language"] = selected_language
+
+    data_cfg = train_cfg.setdefault("data", {})
+    data_cfg["language_filter"] = selected_language
+
+    training_cfg = train_cfg.setdefault("training", {})
+    base_output_dir = Path(
+        str(training_cfg.get("output_dir") or "artifacts/models/whisper_medium_adalora")
+    )
+    profile = _training_profile_name(base_output_dir)
+    suffix = "" if profile == "local" else f"_{profile}"
+    training_cfg["output_dir"] = str(
+        base_output_dir.parent / f"whisper_medium_adalora_{adapter_name}{suffix}"
+    )
+    training_cfg["run_name"] = f"whisper-medium-adalora-{adapter_name.replace('_', '-')}-{profile}"
+    return adapter_name
+
+
+def require_language_adapter_selection(train_cfg: dict[str, Any]) -> None:
+    peft_cfg = train_cfg.get("peft", {}) or {}
+    if not is_peft_enabled(peft_cfg):
+        return
+    if str(peft_cfg.get("adapter_scope") or "").lower() != "language":
+        return
+    if peft_cfg.get("active_language"):
+        return
+    languages = ", ".join(dict(peft_cfg.get("language_adapters") or {}).keys())
+    raise ValueError(
+        "目前設定使用語言專屬 AdaLoRA，但尚未指定訓練語言；"
+        f"請在指令加入 --language，例如 --language zh-TW 或 --language nan-tw。"
+        f"可用語言: {languages or '未設定'}。"
+    )
 
 
 def resolve_split_source(
@@ -306,6 +414,7 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
             training_cfg.get("gradient_accumulation_steps", 4)
         ),
         "learning_rate": float(training_cfg.get("learning_rate", 1.0e-5)),
+        "lr_scheduler_type": str(training_cfg.get("lr_scheduler_type", "linear")),
         "warmup_steps": int(training_cfg.get("warmup_steps", 500)),
         "num_train_epochs": float(training_cfg.get("num_train_epochs", 10.0)),
         "fp16": bool(training_cfg.get("fp16", False)),
@@ -336,6 +445,7 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
     kwargs["logging_strategy"] = str(training_cfg.get("logging_strategy", "steps"))
     kwargs["run_name"] = str(training_cfg.get("run_name") or output_dir.name)
     optional_int_args = (
+        "dataloader_prefetch_factor",
         "eval_accumulation_steps",
         "torch_empty_cache_steps",
     )
@@ -345,13 +455,22 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
             kwargs[key] = int(value)
     optional_bool_args = (
         "batch_eval_metrics",
+        "dataloader_pin_memory",
+        "dataloader_persistent_workers",
         "eval_do_concat_batches",
         "include_inputs_for_metrics",
+        "tf32",
+        "torch_compile",
     )
     for key in optional_bool_args:
         value = training_cfg.get(key)
         if value is not None:
             kwargs[key] = bool(value)
+    optional_str_args = ("optim",)
+    for key in optional_str_args:
+        value = training_cfg.get(key)
+        if value:
+            kwargs[key] = str(value)
 
     supported_kwargs = {
         key: value for key, value in kwargs.items() if key in signature.parameters
@@ -431,8 +550,10 @@ def maybe_warmup_first_batch(
 
 def main(
     *,
-    default_config: str = "configs/baseline.yaml",
-    description: str = "訓練 Whisper-medium 基線模型。",
+    default_config: str = "configs/config.yaml",
+    description: str = "訓練 Whisper-medium 語言專屬 AdaLoRA 模型。",
+    experiment_key: str | None = "whisper_train",
+    include_language_arg: bool = True,
 ) -> None:
     from transformers import (
         AutoModelForSpeechSeq2Seq,
@@ -443,12 +564,27 @@ def main(
         TrainerCallback,
     )
 
-    args = parse_args(default_config=default_config, description=description)
+    args = parse_args(
+        default_config=default_config,
+        description=description,
+        include_language_arg=include_language_arg,
+    )
     config = load_config(args.config)
     base_config_path = Path(str(config.get("base_config") or "configs/config.yaml"))
     base_config = load_config(base_config_path)
 
-    train_cfg = get_whisper_experiment_config(config)
+    train_cfg = get_merged_experiment_config(
+        config,
+        base_config,
+        experiment_key=experiment_key,
+    )
+    if not train_cfg:
+        raise ValueError(f"設定檔缺少訓練區塊: {experiment_key or 'whisper_train'}")
+    selected_adapter = apply_language_training_override(
+        train_cfg,
+        getattr(args, "language", None),
+    )
+    require_language_adapter_selection(train_cfg)
     model_cfg = train_cfg.get("model", {}) or {}
     data_cfg = train_cfg.get("data", {}) or {}
     training_cfg = train_cfg.get("training", {}) or {}
@@ -478,7 +614,7 @@ def main(
     )
     max_train_samples = training_cfg.get("max_train_samples")
     max_eval_samples = training_cfg.get("max_eval_samples")
-    output_dir = resolve_output_dir(config, model_name_or_path)
+    output_dir = resolve_training_output_dir(train_cfg, model_name_or_path)
 
     processor = AutoProcessor.from_pretrained(
         model_name_or_path,
@@ -597,6 +733,7 @@ def main(
                 "train_split": train_split,
                 "eval_split": eval_split,
                 "language_filter": language_filter,
+                "selected_adapter": selected_adapter,
                 "output_dir": str(output_dir),
                 "final_dir": str(output_dir / "final"),
                 "train_samples": len(train_dataset),
@@ -646,7 +783,7 @@ def main(
         encoding="utf-8",
     )
     print(
-        "已保存 Whisper 基線 BEST 權重: "
+        "已保存 Whisper AdaLoRA BEST 權重: "
         f"{final_dir} best_checkpoint={trainer.state.best_model_checkpoint} "
         f"best_metric={trainer.state.best_metric}",
         flush=True,
