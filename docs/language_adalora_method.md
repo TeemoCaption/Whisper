@@ -23,7 +23,7 @@ shared Whisper-medium backbone
 
 新增語言時不重新訓練 Whisper 底座，只新增該語言的 adapter 設定與訓練資料篩選。
 
-推論時不採用信心閥值混合 adapter，而是先用 Whisper encoder 的凍結表示訓練一個輕量語言分類頭，預測輸入音訊是 `zh-TW` 或 `nan-tw`，再選擇對應 adapter。分類頭使用平均池化加最大池化，再接兩層 MLP；這比單層線性頭穩定，但仍只增加很少參數。
+推論時不採用信心閥值混合 adapter，而是先用 Whisper encoder 的凍結表示訓練一個輕量語言分類頭，預測輸入音訊是 `zh-TW` 或 `nan-tw`，再選擇對應 adapter。分類頭使用注意力池化，讓模型自行加權較有語言辨識線索的時間片段，再接兩層 MLP；這比固定平均整段音訊更能保留有效語音線索。
 
 ## 設定方式
 

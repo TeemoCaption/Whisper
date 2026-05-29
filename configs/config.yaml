@@ -128,7 +128,8 @@ whisper_train:
     warmup_steps: 100
     weight_decay: 0.01
     max_grad_norm: 1.0
-    pooling: mean_max
+    pooling: attention
+    attention_hidden_size: 256
     hidden_ratio: 0.5
     num_hidden_layers: 2
     dropout: 0.1
@@ -141,6 +142,7 @@ whisper_train:
     bf16: false
     tf32: true
     logging_steps: 25
+    log_step_loss: false
     disable_tqdm: false
     early_stopping:
       enabled: true

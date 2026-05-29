@@ -203,14 +203,66 @@ def save_confusion_matrix_artifacts(
         fig.savefig(png_path, dpi=160)
         plt.close(fig)
     except Exception as exc:
-        fallback_path = matrix_dir / f"{name}.txt"
-        fallback_path.write_text(
-            f"無法輸出混淆矩陣圖片: {exc}\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
-            + "\n",
-            encoding="utf-8",
-        )
-        png_path = fallback_path
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            cell_size = 120
+            label_width = 120
+            title_height = 70
+            axis_height = 80
+            size = len(labels)
+            width = label_width + cell_size * size + 30
+            height = title_height + cell_size * size + axis_height
+            image = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(image)
+            font = ImageFont.load_default()
+            max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 1
+            max_value = max(1, max_value)
+
+            draw.text((20, 20), f"Language Confusion Matrix - {name}", fill="black", font=font)
+            draw.text((label_width + 20, height - 45), "Predicted label", fill="black", font=font)
+            draw.text((10, title_height + 20), "True", fill="black", font=font)
+
+            for index, label in enumerate(labels):
+                x = label_width + index * cell_size + 20
+                draw.text((x, title_height - 25), label, fill="black", font=font)
+                y = title_height + index * cell_size + 45
+                draw.text((20, y), label, fill="black", font=font)
+
+            for row_index, row in enumerate(confusion_matrix):
+                for col_index, value in enumerate(row):
+                    ratio = float(value) / max_value
+                    blue = int(255 - 155 * ratio)
+                    fill = (blue, blue, 255)
+                    x0 = label_width + col_index * cell_size
+                    y0 = title_height + row_index * cell_size
+                    x1 = x0 + cell_size
+                    y1 = y0 + cell_size
+                    draw.rectangle((x0, y0, x1, y1), fill=fill, outline="black")
+                    text = str(value)
+                    text_box = draw.textbbox((0, 0), text, font=font)
+                    text_width = text_box[2] - text_box[0]
+                    text_height = text_box[3] - text_box[1]
+                    text_color = "white" if ratio > 0.55 else "black"
+                    draw.text(
+                        (
+                            x0 + (cell_size - text_width) / 2,
+                            y0 + (cell_size - text_height) / 2,
+                        ),
+                        text,
+                        fill=text_color,
+                        font=font,
+                    )
+            image.save(png_path)
+        except Exception as pillow_exc:
+            fallback_path = matrix_dir / f"{name}.txt"
+            fallback_path.write_text(
+                f"無法輸出混淆矩陣圖片: matplotlib={exc}; pillow={pillow_exc}\n"
+                + json.dumps(payload, ensure_ascii=False, indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+            png_path = fallback_path
 
     return {
         "json": str(json_path),
@@ -272,11 +324,20 @@ def init_wandb(cfg: dict[str, Any], output_dir: Path):
 
     os.environ.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project") or "whisper-tw"))
     os.environ.setdefault("WANDB_NAME", str(cfg.get("run_name") or output_dir.name))
+    os.environ["WANDB_DISABLE_STATS"] = "false"
     return wandb.init(
         project=os.environ["WANDB_PROJECT"],
         name=os.environ["WANDB_NAME"],
         config=cfg,
     )
+
+
+def filter_wandb_scalars(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if isinstance(value, (int, float)) and "confusion_matrix" not in key
+    }
 
 
 def main() -> None:
@@ -317,7 +378,8 @@ def main() -> None:
     spec = LanguageClassifierSpec(
         labels=tuple(labels),
         hidden_size=hidden_size,
-        pooling=str(cls_cfg.get("pooling") or "mean_max"),
+        pooling=str(cls_cfg.get("pooling") or "attention"),
+        attention_hidden_size=int(cls_cfg.get("attention_hidden_size", 256)),
         hidden_ratio=float(cls_cfg.get("hidden_ratio", 0.5)),
         num_hidden_layers=int(cls_cfg.get("num_hidden_layers", 2)),
         dropout=float(cls_cfg.get("dropout", 0.1)),
@@ -432,6 +494,7 @@ def main() -> None:
                 "device": str(device),
                 "classifier": {
                     "pooling": spec.pooling,
+                    "attention_hidden_size": spec.attention_hidden_size,
                     "hidden_ratio": spec.hidden_ratio,
                     "num_hidden_layers": spec.num_hidden_layers,
                     "dropout": spec.dropout,
@@ -480,11 +543,15 @@ def main() -> None:
             loss_value = float(loss.detach().cpu())
             losses.append(loss_value)
             progress.set_postfix(loss=f"{loss_value:.4f}")
-            if wandb_run is not None and global_step % int(cls_cfg.get("logging_steps", 25)) == 0:
+            if (
+                bool(cls_cfg.get("log_step_loss", False))
+                and wandb_run is not None
+                and global_step % int(cls_cfg.get("logging_steps", 25)) == 0
+            ):
                 wandb_run.log(
                     {
-                        "train/loss": loss_value,
-                        "train/learning_rate": scheduler.get_last_lr()[0],
+                        "train_step_loss": loss_value,
+                        "learning_rate": scheduler.get_last_lr()[0],
                         "epoch": epoch,
                     },
                     step=global_step,
@@ -509,7 +576,10 @@ def main() -> None:
         current_macro_f1 = float(eval_metrics["macro_f1"])
         improved = current_macro_f1 > best_macro_f1 + early_stopping_min_delta
         if wandb_run is not None:
-            wandb_run.log(metrics, step=global_step)
+            wandb_run.log(
+                filter_wandb_scalars(metrics),
+                step=global_step,
+            )
 
         if improved:
             best_macro_f1 = current_macro_f1
@@ -577,12 +647,12 @@ def main() -> None:
     )
     print(json.dumps(test_summary, ensure_ascii=False), flush=True)
     if wandb_run is not None:
-        log_payload = dict(test_summary)
+        log_payload = filter_wandb_scalars(test_summary)
         image_path = test_confusion_paths.get("image")
         if image_path and str(image_path).endswith(".png"):
             import wandb
 
-            log_payload["test/confusion_matrix"] = wandb.Image(image_path)
+            log_payload["test_confusion_matrix"] = wandb.Image(image_path)
         wandb_run.log(log_payload, step=global_step)
 
     if wandb_run is not None:

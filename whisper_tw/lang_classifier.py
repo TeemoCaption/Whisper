@@ -11,31 +11,30 @@ from torch import nn
 class LanguageClassifierSpec:
     labels: tuple[str, ...]
     hidden_size: int
-    pooling: str = "mean_max"
+    pooling: str = "attention"
+    attention_hidden_size: int = 256
     hidden_ratio: float = 0.5
     num_hidden_layers: int = 2
     dropout: float = 0.1
 
 
-def pool_encoder_states(
-    hidden_states: torch.Tensor,
-    *,
-    pooling: str = "mean_max",
-) -> torch.Tensor:
-    if hidden_states.ndim != 3:
-        raise ValueError("encoder hidden states must have shape [batch, time, hidden].")
-
-    mode = str(pooling or "mean_max").lower()
-    if mode == "mean":
-        return hidden_states.mean(dim=1)
-    if mode == "max":
-        return hidden_states.max(dim=1).values
-    if mode == "mean_max":
-        return torch.cat(
-            [hidden_states.mean(dim=1), hidden_states.max(dim=1).values],
-            dim=-1,
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_size: int, attention_hidden_size: int = 256) -> None:
+        super().__init__()
+        attn_size = max(1, int(attention_hidden_size))
+        self.scorer = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, attn_size),
+            nn.Tanh(),
+            nn.Linear(attn_size, 1),
         )
-    raise ValueError("pooling must be one of: mean, max, mean_max.")
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.ndim != 3:
+            raise ValueError("encoder hidden states must have shape [batch, time, hidden].")
+        scores = self.scorer(hidden_states).squeeze(-1)
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)
+        return (hidden_states * weights).sum(dim=1)
 
 
 class LanguageClassifierHead(nn.Module):
@@ -74,7 +73,14 @@ class WhisperLanguageClassifier(nn.Module):
     def __init__(self, spec: LanguageClassifierSpec) -> None:
         super().__init__()
         self.spec = spec
-        input_size = spec.hidden_size * 2 if spec.pooling == "mean_max" else spec.hidden_size
+        pooling = str(spec.pooling or "attention").lower()
+        if pooling != "attention":
+            raise ValueError("語言分類頭目前只支援 attention 池化。")
+        self.attention_pooling = AttentionPooling(
+            spec.hidden_size,
+            spec.attention_hidden_size,
+        )
+        input_size = spec.hidden_size
         self.head = LanguageClassifierHead(
             input_size=input_size,
             num_labels=len(spec.labels),
@@ -84,10 +90,7 @@ class WhisperLanguageClassifier(nn.Module):
         )
 
     def forward(self, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
-        pooled = pool_encoder_states(
-            encoder_hidden_states,
-            pooling=self.spec.pooling,
-        )
+        pooled = self.attention_pooling(encoder_hidden_states)
         return self.head(pooled)
 
     def checkpoint_payload(self) -> dict[str, Any]:
@@ -95,6 +98,7 @@ class WhisperLanguageClassifier(nn.Module):
             "labels": list(self.spec.labels),
             "hidden_size": int(self.spec.hidden_size),
             "pooling": self.spec.pooling,
+            "attention_hidden_size": int(self.spec.attention_hidden_size),
             "hidden_ratio": float(self.spec.hidden_ratio),
             "num_hidden_layers": int(self.spec.num_hidden_layers),
             "dropout": float(self.spec.dropout),

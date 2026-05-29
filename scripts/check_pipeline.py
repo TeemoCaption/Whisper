@@ -235,8 +235,13 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
-        lora.get("language_classifier", {}).get("pooling") == "mean_max",
-        "config.yaml 語言分類頭應使用 mean_max 池化。",
+        lora.get("language_classifier", {}).get("pooling") == "attention",
+        "config.yaml 語言分類頭應使用注意力池化。",
+        failures,
+    )
+    require(
+        lora.get("language_classifier", {}).get("attention_hidden_size") == 256,
+        "config.yaml 語言分類頭應設定 attention_hidden_size。",
         failures,
     )
     for key in ("model", "peft", "data"):
