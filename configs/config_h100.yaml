@@ -8,6 +8,7 @@ whisper_train:
     unfreeze_encoder_last_n_layers: 4
     train_decoder: false
     gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
 
   peft:
     enabled: true

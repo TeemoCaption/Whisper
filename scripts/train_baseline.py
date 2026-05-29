@@ -313,7 +313,7 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
         "save_steps": int(training_cfg.get("save_steps", 500)),
         "logging_steps": int(training_cfg.get("logging_steps", 25)),
         "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
-        "predict_with_generate": True,
+        "predict_with_generate": bool(training_cfg.get("predict_with_generate", True)),
         "generation_max_length": int(training_cfg.get("generation_max_length", 192)),
         "generation_num_beams": int(training_cfg.get("generation_num_beams", 1)),
         "load_best_model_at_end": True,
@@ -335,6 +335,23 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
     kwargs["eval_steps"] = int(training_cfg.get("eval_steps", 500))
     kwargs["logging_strategy"] = str(training_cfg.get("logging_strategy", "steps"))
     kwargs["run_name"] = str(training_cfg.get("run_name") or output_dir.name)
+    optional_int_args = (
+        "eval_accumulation_steps",
+        "torch_empty_cache_steps",
+    )
+    for key in optional_int_args:
+        value = training_cfg.get(key)
+        if value is not None:
+            kwargs[key] = int(value)
+    optional_bool_args = (
+        "batch_eval_metrics",
+        "eval_do_concat_batches",
+        "include_inputs_for_metrics",
+    )
+    for key in optional_bool_args:
+        value = training_cfg.get(key)
+        if value is not None:
+            kwargs[key] = bool(value)
 
     supported_kwargs = {
         key: value for key, value in kwargs.items() if key in signature.parameters
@@ -359,17 +376,57 @@ def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) 
     os.environ.setdefault("WANDB_LOG_MODEL", log_model)
 
 
+def get_process_memory_mb() -> float | None:
+    try:
+        import psutil
+    except ImportError:
+        return None
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+
 def build_adalora_callback(trainer_callback_cls, peft_info: dict[str, Any]):
     if str(peft_info.get("method") or "").lower() != "adalora":
         return None
 
     class AdaLoraRankAllocatorCallback(trainer_callback_cls):
-        def on_step_end(self, args, state, control, model=None, **kwargs):
+        def on_pre_optimizer_step(self, args, state, control, model=None, **kwargs):
             if model is not None:
-                update_adalora_rank_allocation(model, int(state.global_step))
+                update_adalora_rank_allocation(model, int(state.global_step) + 1)
             return control
 
     return AdaLoraRankAllocatorCallback()
+
+
+def configure_gradient_checkpointing(model, model_cfg: dict[str, Any], peft_enabled: bool) -> None:
+    if not bool(model_cfg.get("gradient_checkpointing", True)):
+        return
+
+    if peft_enabled and hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
+    use_reentrant = bool(model_cfg.get("gradient_checkpointing_use_reentrant", False))
+    kwargs = {"use_reentrant": use_reentrant}
+    signature = inspect.signature(model.gradient_checkpointing_enable)
+    if "gradient_checkpointing_kwargs" in signature.parameters:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=kwargs)
+    else:
+        model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+
+
+def maybe_warmup_first_batch(
+    train_dataset: WhisperTrainingDataset,
+    eval_dataset: WhisperTrainingDataset,
+    training_cfg: dict[str, Any],
+) -> None:
+    if not bool(training_cfg.get("warmup_first_batch", True)):
+        return
+
+    print("預熱第一筆訓練與驗證音訊，確認音訊解碼與特徵抽取可正常執行。", flush=True)
+    train_dataset[0]
+    eval_dataset[0]
+    print("第一筆音訊預熱完成。", flush=True)
 
 
 def main(
@@ -412,7 +469,6 @@ def main(
         model_cfg.get("unfreeze_encoder_last_n_layers", 0)
     )
     train_decoder = bool(model_cfg.get("train_decoder", False))
-    gradient_checkpointing = bool(model_cfg.get("gradient_checkpointing", True))
 
     train_split = str(
         data_cfg.get("train_split") or base_config.get("data", {}).get("train_split", "train")
@@ -454,11 +510,7 @@ def main(
             unfreeze_last_n_layers=unfreeze_encoder_last_n_layers,
             train_decoder=train_decoder,
         )
-    if gradient_checkpointing:
-        if is_peft_enabled(peft_cfg) and hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-        model.gradient_checkpointing_enable()
-        model.config.use_cache = False
+    configure_gradient_checkpointing(model, model_cfg, is_peft_enabled(peft_cfg))
 
     train_dataset = WhisperTrainingDataset(
         base_config=base_config,
@@ -484,6 +536,21 @@ def main(
         raise ValueError(
             "驗證資料為空；請先執行 Common Voice 前處理，或檢查 language_filter。"
         )
+    print(
+        json.dumps(
+            {
+                "stage": "datasets_ready",
+                "train_samples": len(train_dataset),
+                "eval_samples": len(eval_dataset),
+                "first_train_audio": str(train_dataset.samples[0].audio_path),
+                "first_eval_audio": str(eval_dataset.samples[0].audio_path),
+                "process_memory_mb": get_process_memory_mb(),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    maybe_warmup_first_batch(train_dataset, eval_dataset, training_cfg)
 
     configure_wandb_environment(training_cfg, output_dir)
     training_args = build_training_arguments(
@@ -557,6 +624,7 @@ def main(
         flush=True,
     )
 
+    print("開始訓練；若進度停在 0%，通常是在解碼第一批音訊與建立特徵。", flush=True)
     trainer.train()
 
     final_dir = output_dir / "final"

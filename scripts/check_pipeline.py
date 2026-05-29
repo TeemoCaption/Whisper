@@ -119,6 +119,18 @@ def validate_configs(failures: list[str]) -> None:
     lora_h100 = load_config(ROOT / "configs" / "config_h100.yaml")["whisper_train"]
 
     require("peft" in requirements, "requirements.txt 缺少 peft 依賴。", failures)
+    train_script = read_text(ROOT / "scripts" / "train_baseline.py")
+    require(
+        "def on_pre_optimizer_step" in train_script,
+        "AdaLoRA 秩分配應在最佳化器更新前執行，避免梯度已清空。",
+        failures,
+    )
+    require(
+        "def on_step_end" not in train_script
+        or "update_adalora_rank_allocation(model" not in train_script.split("def on_step_end", 1)[1],
+        "AdaLoRA 不可在 on_step_end 更新秩分配，否則可能遇到 grad=None。",
+        failures,
+    )
     require(
         "model_name_or_path: openai/whisper-medium" in baseline_cfg,
         "baseline.yaml 未固定 Whisper-medium。",
@@ -133,6 +145,11 @@ def validate_configs(failures: list[str]) -> None:
     require(
         baseline.get("training", {}).get("disable_tqdm") is False,
         "baseline.yaml 未明確開啟訓練進度條。",
+        failures,
+    )
+    require(
+        baseline.get("model", {}).get("gradient_checkpointing_use_reentrant") is False,
+        "baseline.yaml 應使用非重入梯度檢查點，避免凍結 Whisper 時梯度中斷。",
         failures,
     )
     require(
@@ -173,6 +190,46 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
+        lora.get("training", {}).get("eval_steps") >= 1000,
+        "config.yaml 的驗證頻率過高，8GB 低 CPU 設定應降低驗證頻率。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("logging_steps") >= 100,
+        "config.yaml 的紀錄頻率過高，會增加 CPU 與 wandb 負擔。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("disable_tqdm") is True,
+        "config.yaml 8GB 低 CPU 設定應關閉 tqdm 終端進度條。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("warmup_first_batch") is True,
+        "config.yaml 應啟用第一批資料預熱，方便定位 0% 卡住原因。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("max_eval_samples") == 1000,
+        "config.yaml 8GB 設定應限制驗證樣本數，避免評估時 RAM 持續上升。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("eval_accumulation_steps") == 16,
+        "config.yaml 8GB 設定應啟用評估累積釋放，降低 RAM 峰值。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("eval_do_concat_batches") is False,
+        "config.yaml 8GB 設定應避免評估批次長時間累積在 RAM。",
+        failures,
+    )
+    require(
+        lora.get("training", {}).get("torch_empty_cache_steps") == 100,
+        "config.yaml 8GB 設定應定期釋放框架快取。",
+        failures,
+    )
+    require(
         lora_h100.get("training", {}).get("bf16") is True,
         "H100 設定未啟用 bf16。",
         failures,
@@ -182,10 +239,15 @@ def validate_configs(failures: list[str]) -> None:
         ("config_h100.yaml", lora_h100),
     ):
         require(
-            cfg.get("training", {}).get("disable_tqdm") is False,
-            f"{label} 未明確開啟訓練進度條。",
+            cfg.get("model", {}).get("gradient_checkpointing_use_reentrant") is False,
+            f"{label} 應使用非重入梯度檢查點，避免低秩參數梯度為 None。",
             failures,
         )
+    require(
+        lora_h100.get("training", {}).get("disable_tqdm") is False,
+        "config_h100.yaml 未明確開啟訓練進度條。",
+        failures,
+    )
     require(
         "scripts\\train_baseline.py" in read_text(ROOT / "README.md"),
         "README.md 缺少基線訓練腳本指令。",

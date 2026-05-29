@@ -80,8 +80,33 @@ def read_common_voice_split(
 
 
 def load_audio_waveform(path: str | Path, sample_rate: int) -> torch.Tensor:
-    waveform, sr = torchaudio.load(str(path))
-    waveform = waveform.mean(dim=0)
-    if sr != sample_rate:
-        waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
-    return waveform
+    audio_path = Path(path)
+    try:
+        waveform, sr = torchaudio.load(str(audio_path))
+        waveform = waveform.mean(dim=0)
+        if sr != sample_rate:
+            waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
+        return waveform
+    except Exception as torchaudio_error:
+        try:
+            import librosa
+        except ImportError as import_error:
+            raise RuntimeError(
+                "無法解碼音訊，且目前環境缺少 librosa 後備解碼。"
+                "Common Voice 使用 MP3，請先執行："
+                " conda install -c conda-forge ffmpeg libsndfile -y"
+                " 並執行 pip install -r requirements.txt。"
+            ) from import_error
+
+        try:
+            waveform_array, _ = librosa.load(
+                str(audio_path),
+                sr=sample_rate,
+                mono=True,
+            )
+        except Exception as librosa_error:
+            raise RuntimeError(
+                f"無法解碼音訊: {audio_path}。"
+                "請確認環境已安裝 ffmpeg/libsndfile，或檔案不是損毀的 MP3。"
+            ) from librosa_error
+        return torch.as_tensor(waveform_array, dtype=torch.float32)

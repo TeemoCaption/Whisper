@@ -8,6 +8,7 @@ whisper_train:
     unfreeze_encoder_last_n_layers: 4
     train_decoder: false
     gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
 
   peft:
     enabled: true
@@ -88,7 +89,7 @@ whisper_train:
     # 8GB VRAM 預設：降低單步批次，靠梯度累積維持有效批次。
     output_dir: artifacts/models/whisper_medium_lora_8gb
     max_train_samples:
-    max_eval_samples:
+    max_eval_samples: 1000
     num_train_epochs: 10.0
     learning_rate: 1.0e-5
     warmup_steps: 500
@@ -96,10 +97,15 @@ whisper_train:
     per_device_eval_batch_size: 1
     gradient_accumulation_steps: 16
     eval_strategy: steps
-    eval_steps: 500
-    save_steps: 500
-    logging_steps: 25
-    generation_max_length: 128
+    eval_steps: 1000
+    save_steps: 1000
+    logging_steps: 100
+    eval_accumulation_steps: 16
+    torch_empty_cache_steps: 100
+    eval_do_concat_batches: false
+    include_inputs_for_metrics: false
+    predict_with_generate: true
+    generation_max_length: 96
     generation_num_beams: 1
     fp16: true
     save_total_limit: 2
@@ -112,7 +118,8 @@ whisper_train:
     run_name: whisper-medium-lora-8gb
     wandb_log_model: false
     dataloader_num_workers: 0
-    disable_tqdm: false
+    disable_tqdm: true
+    warmup_first_batch: true
 
   early_stopping:
     enabled: true

@@ -7,6 +7,22 @@
 
 若後續整合雙語資料或語言切換機制，方向是同一模型內根據語言信心或語言判別結果，決定輸出中文或台語辨識結果；不是把台語音訊轉成華語文字。
 
+建立乾淨 Conda 環境：
+
+```powershell
+conda create -n whisper-tw python=3.11 -y
+conda activate whisper-tw
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+conda install -c conda-forge ffmpeg libsndfile -y
+pip install -r requirements.txt
+```
+
+確認 CUDA 可用：
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.version.cuda); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+```
+
 下載所有已知 Common Voice 資料集。若資料夾已存在，腳本會自動略過並繼續下一份：
 
 ```powershell

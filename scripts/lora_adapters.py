@@ -152,6 +152,16 @@ def update_adalora_rank_allocation(model, global_step: int) -> bool:
             continue
         method = getattr(candidate, "update_and_allocate", None)
         if callable(method):
+            trainable_params = [
+                param for param in candidate.parameters() if param.requires_grad
+            ]
+            if trainable_params and not any(
+                param.grad is not None for param in trainable_params
+            ):
+                return False
+            for param in trainable_params:
+                if param.grad is None:
+                    param.grad = param.new_zeros(param.shape)
             method(global_step)
             return True
     return False
