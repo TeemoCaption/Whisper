@@ -6,3 +6,40 @@ wandb/
 .wandb_data/
 __pycache__/
 *.pyc
+
+# 模型權重與訓練輸出
+*.bin
+*.ckpt
+*.gguf
+*.h5
+*.onnx
+*.pt
+*.pth
+*.safetensors
+checkpoint-*/
+checkpoints/
+outputs/
+runs/
+
+# 資料集與音訊大檔
+*.flac
+*.m4a
+*.mp3
+*.tar
+*.tar.gz
+*.tgz
+*.tsv.gz
+*.wav
+*.zip
+
+# 論文與實驗暫存
+tmp/
+tmp_*.pdf
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz

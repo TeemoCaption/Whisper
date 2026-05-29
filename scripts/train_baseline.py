@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,15 +18,36 @@ if str(ROOT) not in sys.path:
 from whisper_tw.config import load_config, resolve_common_voice_split_source
 from whisper_tw.data import load_audio_waveform, read_common_voice_split
 from whisper_tw.metrics import character_error_rate
-from whisper_tw.text_normalization import build_text_normalizer
+from whisper_tw.text_norm import build_text_normalizer
+
+try:
+    from scripts.lora_adapters import (
+        apply_peft_adapters,
+        count_parameters,
+        is_peft_enabled,
+        save_peft_artifacts,
+        update_adalora_rank_allocation,
+    )
+except ImportError:
+    from lora_adapters import (
+        apply_peft_adapters,
+        count_parameters,
+        is_peft_enabled,
+        save_peft_artifacts,
+        update_adalora_rank_allocation,
+    )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="以目前資料集微調 Whisper 基線模型。")
+def parse_args(
+    *,
+    default_config: str = "configs/baseline.yaml",
+    description: str = "訓練 Whisper-medium 基線模型。",
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--config",
-        default="configs/whisper_finetune.yaml",
-        help="Whisper 微調設定檔路徑。",
+        default=default_config,
+        help="Whisper 訓練設定檔路徑。",
     )
     return parser.parse_args()
 
@@ -48,25 +70,70 @@ def get_nested(config: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return current
 
 
+def get_whisper_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
+    section = config.get("whisper_train")
+    if isinstance(section, dict):
+        return section
+    section = config.get("whisper_baseline")
+    if isinstance(section, dict):
+        return section
+    return {}
+
+
+def get_data_config(config: dict[str, Any]) -> dict[str, Any]:
+    data_cfg = config.get("data")
+    if isinstance(data_cfg, dict):
+        return data_cfg
+    experiment_cfg = get_whisper_experiment_config(config)
+    data_cfg = experiment_cfg.get("data") if isinstance(experiment_cfg, dict) else None
+    if isinstance(data_cfg, dict):
+        return data_cfg
+    return {}
+
+
 def resolve_output_dir(config: dict[str, Any], model_name_or_path: str) -> Path:
-    output_dir = get_nested(config, "whisper_finetune", "training", "output_dir")
+    experiment_cfg = get_whisper_experiment_config(config)
+    output_dir = get_nested(experiment_cfg, "training", "output_dir")
     if output_dir:
         return Path(str(output_dir))
     return Path("artifacts") / "baselines" / f"{sanitize_model_name(model_name_or_path)}_ft"
 
 
-class WhisperFineTuneDataset(torch.utils.data.Dataset):
+def resolve_split_source(
+    base_config: dict[str, Any],
+    train_data_cfg: dict[str, Any],
+    split: str,
+) -> str | Path:
+    if split == str(train_data_cfg.get("train_split", "train")) and train_data_cfg.get("train_tsv"):
+        return train_data_cfg["train_tsv"]
+    if split == str(train_data_cfg.get("eval_split", "dev")) and train_data_cfg.get("eval_tsv"):
+        return train_data_cfg["eval_tsv"]
+    base_data_cfg = get_data_config(base_config)
+    if not base_data_cfg:
+        return split
+    return resolve_common_voice_split_source(base_data_cfg, split)
+
+
+class WhisperTrainingDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         *,
         base_config: dict[str, Any],
+        train_data_cfg: dict[str, Any],
         split: str,
         processor,
         max_samples: int | None = None,
+        language_filter: str | None = None,
     ) -> None:
-        data_cfg = base_config["data"]
-        split_source = resolve_common_voice_split_source(data_cfg, split)
-        self.samples = read_common_voice_split(data_cfg["root"], split_source)
+        data_cfg = get_data_config(base_config)
+        if not data_cfg:
+            data_cfg = train_data_cfg
+        split_source = resolve_split_source(base_config, train_data_cfg, split)
+        self.samples = read_common_voice_split(
+            data_cfg.get("root", "data"),
+            split_source,
+            language_filter=language_filter,
+        )
         if max_samples is not None:
             self.samples = self.samples[: max(0, int(max_samples))]
         self.processor = processor
@@ -75,6 +142,7 @@ class WhisperFineTuneDataset(torch.utils.data.Dataset):
             self.sample_rate * float(data_cfg.get("max_audio_seconds", 30.0))
         )
         self.normalizer = build_text_normalizer(data_cfg.get("text_normalization"))
+        self.language_filter = language_filter
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -131,8 +199,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 
 def build_compute_metrics(processor, base_config: dict[str, Any]):
+    data_cfg = get_data_config(base_config)
     normalizer = build_text_normalizer(
-        base_config.get("data", {}).get("text_normalization")
+        data_cfg.get("text_normalization")
     )
 
     def normalize(text: str) -> str:
@@ -158,10 +227,20 @@ def build_compute_metrics(processor, base_config: dict[str, Any]):
 
 
 def get_whisper_encoder(model):
-    if hasattr(model, "model") and hasattr(model.model, "encoder"):
-        return model.model.encoder
-    if hasattr(model, "encoder"):
-        return model.encoder
+    candidates = [model]
+    for attr in ("base_model", "model"):
+        nested = getattr(model, attr, None)
+        if nested is not None:
+            candidates.append(nested)
+            nested_model = getattr(nested, "model", None)
+            if nested_model is not None:
+                candidates.append(nested_model)
+
+    for candidate in candidates:
+        if hasattr(candidate, "model") and hasattr(candidate.model, "encoder"):
+            return candidate.model.encoder
+        if hasattr(candidate, "encoder"):
+            return candidate.encoder
     return None
 
 
@@ -230,6 +309,7 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
         "warmup_steps": int(training_cfg.get("warmup_steps", 500)),
         "num_train_epochs": float(training_cfg.get("num_train_epochs", 10.0)),
         "fp16": bool(training_cfg.get("fp16", False)),
+        "bf16": bool(training_cfg.get("bf16", False)),
         "save_steps": int(training_cfg.get("save_steps", 500)),
         "logging_steps": int(training_cfg.get("logging_steps", 25)),
         "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
@@ -242,6 +322,7 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
         "report_to": list(training_cfg.get("report_to", [])),
         "remove_unused_columns": False,
         "dataloader_num_workers": int(training_cfg.get("dataloader_num_workers", 2)),
+        "disable_tqdm": bool(training_cfg.get("disable_tqdm", False)),
     }
 
     signature = inspect.signature(training_cls.__init__)
@@ -252,6 +333,8 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
     )
     kwargs[eval_strategy_key] = str(training_cfg.get("eval_strategy", "steps"))
     kwargs["eval_steps"] = int(training_cfg.get("eval_steps", 500))
+    kwargs["logging_strategy"] = str(training_cfg.get("logging_strategy", "steps"))
+    kwargs["run_name"] = str(training_cfg.get("run_name") or output_dir.name)
 
     supported_kwargs = {
         key: value for key, value in kwargs.items() if key in signature.parameters
@@ -259,25 +342,65 @@ def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_
     return training_cls(**supported_kwargs)
 
 
-def main() -> None:
+def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) -> None:
+    report_to = training_cfg.get("report_to", [])
+    if isinstance(report_to, str):
+        enabled = report_to.lower() == "wandb"
+    else:
+        enabled = "wandb" in [str(item).lower() for item in report_to]
+    if not enabled:
+        return
+
+    project = str(training_cfg.get("wandb_project") or "whisper-tw")
+    run_name = str(training_cfg.get("run_name") or output_dir.name)
+    log_model = str(training_cfg.get("wandb_log_model", "false")).lower()
+    os.environ.setdefault("WANDB_PROJECT", project)
+    os.environ.setdefault("WANDB_NAME", run_name)
+    os.environ.setdefault("WANDB_LOG_MODEL", log_model)
+
+
+def build_adalora_callback(trainer_callback_cls, peft_info: dict[str, Any]):
+    if str(peft_info.get("method") or "").lower() != "adalora":
+        return None
+
+    class AdaLoraRankAllocatorCallback(trainer_callback_cls):
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if model is not None:
+                update_adalora_rank_allocation(model, int(state.global_step))
+            return control
+
+    return AdaLoraRankAllocatorCallback()
+
+
+def main(
+    *,
+    default_config: str = "configs/baseline.yaml",
+    description: str = "訓練 Whisper-medium 基線模型。",
+) -> None:
     from transformers import (
         AutoModelForSpeechSeq2Seq,
         AutoProcessor,
         EarlyStoppingCallback,
         Seq2SeqTrainer,
         Seq2SeqTrainingArguments,
+        TrainerCallback,
     )
 
-    args = parse_args()
+    args = parse_args(default_config=default_config, description=description)
     config = load_config(args.config)
     base_config_path = Path(str(config.get("base_config") or "configs/config.yaml"))
     base_config = load_config(base_config_path)
 
-    fine_cfg = config.get("whisper_finetune", {}) or {}
-    model_cfg = fine_cfg.get("model", {}) or {}
-    data_cfg = fine_cfg.get("data", {}) or {}
-    training_cfg = fine_cfg.get("training", {}) or {}
-    early_stopping_cfg = fine_cfg.get("early_stopping", {}) or {}
+    train_cfg = get_whisper_experiment_config(config)
+    model_cfg = train_cfg.get("model", {}) or {}
+    data_cfg = train_cfg.get("data", {}) or {}
+    training_cfg = train_cfg.get("training", {}) or {}
+    early_stopping_cfg = train_cfg.get("early_stopping", {}) or {}
+    peft_cfg = train_cfg.get("peft", {}) or {}
+    language_filter = data_cfg.get("language_filter")
+    if language_filter is None and str(peft_cfg.get("adapter_scope") or "").lower() == "language":
+        language_filter = peft_cfg.get("active_language")
+    language_filter = None if language_filter in (None, "") else str(language_filter)
 
     model_name_or_path = str(
         model_cfg.get("model_name_or_path") or "openai/whisper-medium"
@@ -314,29 +437,55 @@ def main() -> None:
     model.generation_config.forced_decoder_ids = None
     model.generation_config.suppress_tokens = []
 
-    trainability = configure_encoder_trainability(
-        model,
-        freeze_encoder=freeze_encoder,
-        unfreeze_last_n_layers=unfreeze_encoder_last_n_layers,
-        train_decoder=train_decoder,
-    )
+    peft_info: dict[str, Any] = {"enabled": False, **count_parameters(model)}
+    if is_peft_enabled(peft_cfg):
+        model, peft_info = apply_peft_adapters(model, peft_cfg)
+        encoder = get_whisper_encoder(model)
+        layers = getattr(encoder, "layers", None) if encoder is not None else None
+        trainability = {
+            "encoder_layers": len(layers) if layers is not None else 0,
+            "unfreeze_encoder_last_n_layers": 0,
+            **count_parameters(model),
+        }
+    else:
+        trainability = configure_encoder_trainability(
+            model,
+            freeze_encoder=freeze_encoder,
+            unfreeze_last_n_layers=unfreeze_encoder_last_n_layers,
+            train_decoder=train_decoder,
+        )
     if gradient_checkpointing:
+        if is_peft_enabled(peft_cfg) and hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
 
-    train_dataset = WhisperFineTuneDataset(
+    train_dataset = WhisperTrainingDataset(
         base_config=base_config,
+        train_data_cfg=data_cfg,
         split=train_split,
         processor=processor,
         max_samples=None if max_train_samples is None else int(max_train_samples),
+        language_filter=language_filter,
     )
-    eval_dataset = WhisperFineTuneDataset(
+    eval_dataset = WhisperTrainingDataset(
         base_config=base_config,
+        train_data_cfg=data_cfg,
         split=eval_split,
         processor=processor,
         max_samples=None if max_eval_samples is None else int(max_eval_samples),
+        language_filter=language_filter,
     )
+    if len(train_dataset) == 0:
+        raise ValueError(
+            "訓練資料為空；請先執行 Common Voice 前處理，或檢查 language_filter。"
+        )
+    if len(eval_dataset) == 0:
+        raise ValueError(
+            "驗證資料為空；請先執行 Common Voice 前處理，或檢查 language_filter。"
+        )
 
+    configure_wandb_environment(training_cfg, output_dir)
     training_args = build_training_arguments(
         Seq2SeqTrainingArguments,
         training_cfg,
@@ -352,6 +501,9 @@ def main() -> None:
                 ),
             )
         )
+    adalora_callback = build_adalora_callback(TrainerCallback, peft_info)
+    if adalora_callback is not None:
+        callbacks.append(adalora_callback)
 
     trainer_kwargs: dict[str, Any] = {
         "args": training_args,
@@ -377,6 +529,7 @@ def main() -> None:
                 "model_name_or_path": model_name_or_path,
                 "train_split": train_split,
                 "eval_split": eval_split,
+                "language_filter": language_filter,
                 "output_dir": str(output_dir),
                 "final_dir": str(output_dir / "final"),
                 "train_samples": len(train_dataset),
@@ -385,6 +538,7 @@ def main() -> None:
                 "load_best_model_at_end": training_args.load_best_model_at_end,
                 "freeze_encoder": freeze_encoder,
                 "train_decoder": train_decoder,
+                "peft": peft_info,
                 "encoder_layers": trainability["encoder_layers"],
                 "unfreeze_encoder_last_n_layers": trainability[
                     "unfreeze_encoder_last_n_layers"
@@ -409,19 +563,22 @@ def main() -> None:
     final_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(final_dir))
     processor.save_pretrained(str(final_dir))
+    if bool(peft_info.get("enabled", False)):
+        save_peft_artifacts(trainer.model, final_dir, peft_info)
 
     summary = {
         "best_model_checkpoint": trainer.state.best_model_checkpoint,
         "best_metric": trainer.state.best_metric,
         "metric_for_best_model": training_args.metric_for_best_model,
         "final_dir": str(final_dir),
+        "peft": peft_info,
     }
     (output_dir / "best_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     print(
-        "已保存 Whisper 微調 BEST 權重: "
+        "已保存 Whisper 基線 BEST 權重: "
         f"{final_dir} best_checkpoint={trainer.state.best_model_checkpoint} "
         f"best_metric={trainer.state.best_metric}",
         flush=True,

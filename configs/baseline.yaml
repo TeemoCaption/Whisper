@@ -1,7 +1,8 @@
 base_config: configs/config.yaml
 
-whisper_finetune:
+whisper_baseline:
   model:
+    # 單獨訓練 Whisper-medium，作為不使用低秩適應的基線模型。
     model_name_or_path: openai/whisper-medium
     language: zh
     task: transcribe
@@ -11,6 +12,15 @@ whisper_finetune:
     gradient_checkpointing: true
 
   data:
+    prepared_dir: data/processed/common_voice
+    train_tsv: data/processed/common_voice/train.tsv
+    eval_tsv: data/processed/common_voice/dev.tsv
+    text_column: target_text
+    audio_path_column: audio_path
+    language_label_column: language_label
+    raw_sentence_column: raw_sentence
+    target_script_column: target_script
+    romanization_column: romanization_text
     train_split: train
     eval_split: dev
 
@@ -35,8 +45,13 @@ whisper_finetune:
     load_best_model_at_end: true
     metric_for_best_model: cer
     greater_is_better: false
-    report_to: []
+    report_to:
+      - wandb
+    wandb_project: whisper-tw
+    run_name: whisper-medium-baseline
+    wandb_log_model: false
     dataloader_num_workers: 2
+    disable_tqdm: false
 
   early_stopping:
     enabled: true

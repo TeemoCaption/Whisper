@@ -27,7 +27,7 @@ from whisper_tw.config import (
 )
 from whisper_tw.data import load_audio_waveform, read_common_voice_split
 from whisper_tw.metrics import character_error_rate
-from whisper_tw.text_normalization import build_text_normalizer
+from whisper_tw.text_norm import build_text_normalizer
 from whisper_tw.training import (
     build_components,
     build_dataloader_kwargs,

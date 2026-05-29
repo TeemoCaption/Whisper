@@ -1,157 +1,119 @@
-data:
-  root: data/zh-TW
-  train_split: train
-  dev_split: dev
-  test_split: test
-  train_tsv: data/zh-TW/train.tsv
-  dev_tsv: data/zh-TW/dev.tsv
-  test_tsv: data/zh-TW/test.tsv
-  tokenizer_text_splits: [train, dev, test, validated]
-  sample_rate: 16000
-  max_audio_seconds: 30.0
-  text_normalization:
+whisper_train:
+  model:
+    # 與 8GB 設定保持相同模型與方法，只調整資源相關欄位。
+    model_name_or_path: openai/whisper-medium
+    language: zh
+    task: transcribe
+    freeze_encoder: true
+    unfreeze_encoder_last_n_layers: 4
+    train_decoder: false
+    gradient_checkpointing: true
+
+  peft:
     enabled: true
-    apply_nfkc: true
-    remove_punctuation: true
-    remove_whitespace: true
-  audio_augmentation:
+    method: adalora
+    adapter_scope: shared
+    adapter_name: shared
+    active_adapter:
+    active_language:
+    language_adapters:
+      zh-TW: zh_tw
+      nan-tw: nan_tw
+    save_all_adapters: false
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - out_proj
+      - fc1
+      - fc2
+    bias: none
+    modules_to_save: []
+    lora:
+      r: 32
+      lora_alpha: 64
+      lora_dropout: 0.05
+    adalora:
+      init_r: 32
+      target_r: 16
+      beta1: 0.85
+      beta2: 0.85
+      tinit: 200
+      tfinal: 1000
+      deltaT: 10
+      lora_alpha: 64
+      lora_dropout: 0.05
+      total_step: 12000
+
+  data:
+    root: data
+    prepared_dir: data/processed/common_voice
+    train_tsv: data/processed/common_voice/train.tsv
+    eval_tsv: data/processed/common_voice/dev.tsv
+    test_tsv: data/processed/common_voice/test.tsv
+    text_column: target_text
+    audio_path_column: audio_path
+    language_label_column: language_label
+    raw_sentence_column: raw_sentence
+    target_script_column: target_script
+    romanization_column: romanization_text
+    train_split: train
+    eval_split: dev
+    test_split: test
+    sample_rate: 16000
+    max_audio_seconds: 30.0
+    text_normalization:
+      enabled: true
+      apply_nfkc: true
+      remove_punctuation: false
+      remove_whitespace: true
+
+  routing:
     enabled: true
-    speed_factors: [0.95, 1.0, 1.05]
-    speed_prob: 0.4
-    noise_prob: 0.35
-    min_snr_db: 18.0
-    max_snr_db: 30.0
-    gain_prob: 0.3
-    min_gain_db: -3.0
-    max_gain_db: 3.0
-    shift_prob: 0.2
-    max_shift_ms: 120.0
-  feature_cache:
-    enabled: true
-    root: artifacts/feature_cache_h100
-    strict: true
-    train_variants: 8
+    labels: [zh-TW, nan-tw]
+    high_confidence_threshold: 0.75
+    low_confidence_threshold: 0.55
+    mid_top_k: 2
+    shared_adapter_name: shared
+    adapters:
+      zh-TW: zh_tw
+      nan-tw: nan_tw
+    target_languages:
+      zh-TW: zh-TW
+      nan-tw: nan-tw
 
-tokenizer:
-  type: sentencepiece
-  model_type: unigram
-  vocab_size: 4000
-  model_path: artifacts/tokenizer/spm_zh_tw_4k.model
-  character_coverage: 0.9995
-  pad_id: 0
-  unk_id: 1
-  bos_id: 2
-  eos_id: 3
+  training:
+    # H100 建議設定：模型與低秩方法不變，只提高吞吐。
+    output_dir: artifacts/models/whisper_medium_lora_h100
+    max_train_samples:
+    max_eval_samples:
+    num_train_epochs: 10.0
+    learning_rate: 1.0e-5
+    warmup_steps: 500
+    per_device_train_batch_size: 16
+    per_device_eval_batch_size: 16
+    gradient_accumulation_steps: 1
+    eval_strategy: steps
+    eval_steps: 500
+    save_steps: 500
+    logging_steps: 25
+    generation_max_length: 192
+    generation_num_beams: 1
+    fp16: false
+    bf16: true
+    save_total_limit: 2
+    load_best_model_at_end: true
+    metric_for_best_model: cer
+    greater_is_better: false
+    report_to:
+      - wandb
+    wandb_project: whisper-tw
+    run_name: whisper-medium-lora-h100
+    wandb_log_model: false
+    dataloader_num_workers: 4
+    disable_tqdm: false
 
-character_vocab:
-  path: artifacts/tokenizer/char_zh_tw.txt
-  splits: [train, dev, test, validated]
-
-model:
-  whisper_name: openai/whisper-medium
-  freeze_whisper_encoder: true
-  unfreeze_encoder_last_n_layers: 8
-
-  bopomofo_ctc:
-    enabled: true
-    loss_weight: 0.15
-
-  text_ctc:
-    loss_weight: 1.0
-    dropout: 0.25
-
-  acoustic_encoder:
-    num_layers: 2
-    num_heads: 8
-    hidden_size: 768
-    dropout: 0.15
-
-  acoustic_compressor:
-    stride: 4
-    num_layers: 1
-    num_heads: 8
-    dropout: 0.1
-
-  context_corrector:
-    output_type: ctc_draft_correction
-    num_layers: 2
-    num_heads: 8
-    hidden_size: 512
-    dropout: 0.2
-    max_target_length: 256
-    loss_weight: 0.25
-    use_ctc_draft: true
-    input_dropout: 0.1
-
-training:
-  batch_size: 96
-  eval_batch_size: 256
-  gradient_accumulation_steps: 1
-  learning_rate: 0.0003
-  encoder_learning_rate: 0.00003
-  weight_decay: 0.015
-  grad_clip_norm: 1.0
-  feature_spec_augment:
-    enabled: true
-    freq_masks: 2
-    max_freq_width: 8
-    time_masks: 2
-    max_time_width: 100
-    mask_value: 0.0
-  num_epochs: 30
-  num_workers: 0
-  prefetch_factor: 2
-  eval_num_workers: 0
-  eval_prefetch_factor: 2
-  sharing_strategy: file_system
-  pin_memory: false
-  eval_pin_memory: false
-  persistent_workers: false
-  eval_persistent_workers: false
-  mixed_precision: true
-  amp_dtype: bf16
-  allow_tf32: true
-  cudnn_benchmark: true
-  enable_flash_sdp: true
-  enable_mem_efficient_sdp: true
-  enable_math_sdp: false
-  fused_adamw: true
-  feature_padding: max_length
-  feature_pad_to_multiple_of:
-  compile:
-    enabled: false
-    mode: reduce-overhead
-    fullgraph: false
-    dynamic: true
-  float32_matmul_precision: high
-  log_every: 100
-  output_dir: artifacts/checkpoints_h100
-  device: cuda
-  checkpoint_monitor: val_correction_loss
   early_stopping:
     enabled: true
-    monitor: val_correction_loss
-    patience: 4
-    min_delta: 0.005
-  scheduler:
-    type: warmup_cosine_restarts
-    monitor: val_correction_loss
-    warmup_epochs: 1
-    warmup_start_factor: 0.3
-    t_0: 6
-    t_mult: 2
-    eta_min: 0.00001
-
-wandb:
-  enabled: true
-  project: Whisper-TW
-  name: whisper-medium-ctc-first-h100-spm4k
-  mode: online
-  console: redirect
-
-generation:
-  max_new_tokens: 128
-
-evaluation:
-  output_dir: artifacts/eval
-  progress_update_every: 5
+    patience: 3
+    threshold: 0.0

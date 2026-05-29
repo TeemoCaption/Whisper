@@ -1,2 +1,2 @@
-"""Whisper-TW research framework."""
+"""Utilities for the Whisper-TW experiments."""
 

@@ -51,6 +51,10 @@ def parse_args() -> argparse.Namespace:
         help="API 金鑰。未提供時會先讀 MDC_API_KEY 或 MOZILLA_DATA_COLLECTIVE_API_KEY，仍沒有則會提示輸入。",
     )
     parser.add_argument(
+        "--api-key-file",
+        help="讀取 API 金鑰的本機文字檔路徑；建議放在不提交到版本控制的位置。",
+    )
+    parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
         help="API 基底網址。預設值符合官方文件。",
@@ -140,16 +144,26 @@ def resolve_extraction_dir(destination: Path) -> Path:
     return destination.parent
 
 
-def resolve_api_key(api_key: str | None) -> str:
+def resolve_api_key(api_key: str | None, api_key_file: str | None = None) -> str:
     if api_key:
         key = api_key.strip()
         if key:
             return key
 
+    if api_key_file:
+        key_path = Path(api_key_file)
+        try:
+            key = key_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise DownloadError(f"無法讀取 API 金鑰檔案：{key_path}") from exc
+        if key:
+            return key
+        raise DownloadError(f"API 金鑰檔案是空的：{key_path}")
+
     if not sys.stdin.isatty():
         raise DownloadError(
             "缺少 API 金鑰，且目前不是互動式終端機，無法提示輸入。"
-            "請加上 --api-key 或設定環境變數 MDC_API_KEY。"
+            "請加上 --api-key、--api-key-file，或設定環境變數 MDC_API_KEY。"
         )
 
     try:
@@ -719,6 +733,7 @@ def download_dataset(
     timeout: int,
     overwrite: bool,
     duration_log_path: Path,
+    api_key_file: str | None,
 ) -> Path | None:
     target_dir = migrate_dataset_dir(dataset_spec, output_root)
     flatten_dataset_root_if_needed(target_dir, dataset_spec["output_subdir"])
@@ -730,7 +745,7 @@ def download_dataset(
             append_duration_log(duration_log_path, resolve_display_name(target_dir, dataset_spec["name"]), summary)
         return None
 
-    resolved_api_key = resolve_api_key(api_key)
+    resolved_api_key = resolve_api_key(api_key, api_key_file)
     info = get_download_info(base_url, dataset_spec["dataset_id"], resolved_api_key, timeout)
     download_url = info["downloadUrl"]
     expected_size = info.get("sizeBytes")
@@ -789,7 +804,14 @@ def main() -> int:
                 timeout=args.timeout,
                 overwrite=args.overwrite,
                 duration_log_path=duration_log_path,
+                api_key_file=args.api_key_file,
             )
+        print(
+            "\n資料集下載或確認完成後，可執行前處理："
+            f"\n  python scripts/prepare_cv.py --data-root {output_root}"
+            "\n並檢查欄位："
+            "\n  python scripts/check_cv.py --strict"
+        )
     except DownloadError as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1

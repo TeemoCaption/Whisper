@@ -1,37 +1,76 @@
 # Whisper-TW
 
+目前專案目標是做自動語音辨識：
+
+- `zh-TW` 音訊辨識成中文文字
+- `nan-tw` 音訊辨識成台語文字
+
+若後續整合雙語資料或語言切換機制，方向是同一模型內根據語言信心或語言判別結果，決定輸出中文或台語辨識結果；不是把台語音訊轉成華語文字。
+
 下載所有已知 Common Voice 資料集。若資料夾已存在，腳本會自動略過並繼續下一份：
 
 ```powershell
-python .\scripts\download_data.py --output-dir .\data
+python .\scripts\download_cv.py --output-dir .\data
 ```
 
-訓練 SentencePiece tokenizer：
+Mozilla Data Collective 下載需要 API 金鑰。建議用環境變數，或把金鑰放在本機文字檔後用 `--api-key-file` 指定：
 
 ```powershell
-python .\scripts\train_tokenizer.py --config .\configs\config.yaml
+$env:MDC_API_KEY="你的金鑰"
+python .\scripts\download_cv.py --output-dir .\data
+
+python .\scripts\download_cv.py --output-dir .\data --api-key-file C:\tmp\mdc_api_key.txt
 ```
 
-訓練 Whisper-TW 模型：
+整理 `zh-TW` 與 `nan-tw` 欄位，產生雙語訓練 TSV。`nan-tw` 的括號台羅或白話字會移到輔助欄位，主目標保留台語文字：
 
 ```powershell
-python .\scripts\train.py --config .\configs\config.yaml
+python .\scripts\prepare_cv.py --data-root .\data --output-dir .\data\processed\common_voice
+python .\scripts\check_cv.py --prepared-dir .\data\processed\common_voice --data-root .\data --check-audio --strict
 ```
 
-評估模型：
+`prepare_cv.py` 預設會顯示 tqdm 進度條；若要在記錄檔環境關閉，可加上 `--no-progress`。
+
+訓練預設會把損失、學習率、驗證 CER 等紀錄到 wandb。第一次訓練前請先登入：
 
 ```powershell
-python .\scripts\evaluate.py --config .\configs\config.yaml --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt
+wandb login
 ```
 
-評估目前模型並與基線模型比較：
+訓練 Whisper-medium 基線模型。這個入口不啟用低秩適應，用來產生比較用基線：
 
 ```powershell
-python .\scripts\evaluate_baselines.py --config .\configs\config.yaml --checkpoint .\artifacts\checkpoints\whisper_tw_best.pt --baselines-config .\configs\baselines.yaml
+python .\scripts\train_baseline.py --config .\configs\baseline.yaml
 ```
 
-微調 Whisper 基線模型，預設訓練 10 個 epochs，並將驗證集字錯誤率最佳的權重保存成評估可載入格式：
+訓練 Whisper-medium 低秩適應模型。這個入口用於論文方法改良，預設使用自適應低秩；若要做固定秩對照，可在 `configs/config.yaml` 的 `whisper_train.peft.method` 改成 `lora`：
 
 ```powershell
-python .\scripts\finetune_whisper.py --config .\configs\whisper_finetune.yaml
+python .\scripts\train_lora.py --config .\configs\config.yaml
+```
+
+`configs/config.yaml` 是 8GB VRAM 版本；`configs/config_h100.yaml` 使用相同模型與低秩方法，只提高資源相關設定：
+
+```bash
+python scripts/train_lora.py --config configs/config_h100.yaml
+```
+
+若要訓練語言專屬轉接模組，將 `configs/config.yaml` 的 `adapter_scope` 改成 `language` 並設定 `active_language` 為 `zh-TW` 或 `nan-tw`。
+
+信心閥值路由可先用自我檢查確認：
+
+```powershell
+python .\scripts\route_confidence.py --self-test
+```
+
+整體流程靜態總檢查：
+
+```powershell
+python .\scripts\check_pipeline.py
+```
+
+真實資料下載並完成前處理後，可要求總檢查同時驗證實際 TSV 與音檔路徑：
+
+```powershell
+python .\scripts\check_pipeline.py --require-real-data --data-root .\data --prepared-dir .\data\processed\common_voice
 ```

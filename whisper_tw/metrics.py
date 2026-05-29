@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 
-def edit_distance(a: str, b: str) -> int:
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        curr = [i]
-        for j, cb in enumerate(b, start=1):
-            curr.append(
+def _levenshtein_distance(source: str, target: str) -> int:
+    if source == target:
+        return 0
+    if not source:
+        return len(target)
+    if not target:
+        return len(source)
+
+    previous = list(range(len(target) + 1))
+    for i, source_char in enumerate(source, start=1):
+        current = [i]
+        for j, target_char in enumerate(target, start=1):
+            substitution_cost = 0 if source_char == target_char else 1
+            current.append(
                 min(
-                    prev[j] + 1,
-                    curr[j - 1] + 1,
-                    prev[j - 1] + (ca != cb),
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + substitution_cost,
                 )
             )
-        prev = curr
-    return prev[-1]
+        previous = current
+    return previous[-1]
 
 
 def character_error_rate(predictions: list[str], references: list[str]) -> float:
-    total_dist = 0
+    total_errors = 0
     total_chars = 0
-    for pred, ref in zip(predictions, references):
-        total_dist += edit_distance(pred, ref)
+    for prediction, reference in zip(predictions, references):
+        pred = str(prediction or "")
+        ref = str(reference or "")
+        total_errors += _levenshtein_distance(pred, ref)
         total_chars += len(ref)
-    return total_dist / max(total_chars, 1)
+    if total_chars == 0:
+        return 0.0 if total_errors == 0 else 1.0
+    return total_errors / total_chars

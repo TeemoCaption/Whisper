@@ -1,8 +1,10 @@
 torch>=2.2.0
 torchaudio>=2.2.0
 transformers
+peft>=0.12.0
 accelerate>=1.1.0
 sentencepiece
 PyYAML
 pypinyin
 wandb
+tqdm
