@@ -48,19 +48,17 @@ def resolve_adapter_names(peft_cfg: dict[str, Any]) -> dict[str, Any]:
     else:
         active_name = shared_name
 
-    if scope == "language":
-        adapter_names = list(dict.fromkeys(language_adapters.values()))
-        if active_name not in adapter_names:
-            adapter_names.insert(0, active_name)
-    else:
-        adapter_names = [active_name]
-
     return {
         "adapter_scope": scope,
         "shared_adapter": shared_name,
         "language_adapters": language_adapters,
         "active_adapter": active_name,
-        "adapter_names": adapter_names,
+        # Training injects only the active adapter. AdaLoRA does not support
+        # multiple trainable adapters in one PEFT model.
+        "adapter_names": [active_name],
+        "configured_adapter_names": list(dict.fromkeys(language_adapters.values()))
+        if scope == "language"
+        else [active_name],
     }
 
 
@@ -129,10 +127,6 @@ def apply_peft_adapters(model, peft_cfg: dict[str, Any]):
     active_adapter = adapter_info["active_adapter"]
 
     model = get_peft_model(model, peft_config, adapter_name=active_adapter)
-    for adapter_name in adapter_info["adapter_names"]:
-        if adapter_name == active_adapter:
-            continue
-        model.add_adapter(adapter_name, peft_config)
     model.set_adapter(active_adapter)
 
     method = str(peft_cfg.get("method") or "lora").strip().lower()
@@ -207,4 +201,3 @@ def save_peft_artifacts(model, final_dir: Path, peft_info: dict[str, Any]) -> No
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
