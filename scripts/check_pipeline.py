@@ -208,7 +208,6 @@ def validate_configs(failures: list[str]) -> None:
     require("adapter_scope: language" in docs, "方法文件未對齊語言專屬 adapter。", failures)
     require("AdaLoRA" in docs, "方法文件未說明自適應低秩容量分配。", failures)
     require("語言分類頭" in docs, "方法文件未說明語言分類頭設計。", failures)
-    require("信心閥值" in docs, "方法文件應明確說明不採用信心閥值路由。", failures)
     require(
         "language_classifier:" in lora_cfg,
         "config.yaml 缺少語言分類頭設定。",

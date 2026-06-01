@@ -27,7 +27,6 @@
 - 新增語言時只需新增對應語言 adapter 設定與資料篩選，不需重新訓練 Whisper 底座。
 - 已新增 `whisper_tw/lang_classifier.py`，使用 Whisper encoder 表示的注意力池化，再接兩層 MLP 分類頭。
 - 已新增 `scripts/train_lang_classifier.py`，可用同一份 `config.yaml` 或 `config_h100.yaml` 訓練語言分類頭，推論時用分類結果選擇對應 adapter。
-- 目前不採用信心閥值或 adapter 混合路由，避免低信心樣本導致容量與推論流程不穩定。
 
 ## 四、核心概念對齊
 
