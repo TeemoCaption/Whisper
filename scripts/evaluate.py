@@ -297,7 +297,7 @@ class SpeechEvalCollator:
             [feature["audio"].numpy() for feature in features],
             sampling_rate=self.sample_rate,
             return_tensors="pt",
-            padding=True,
+            padding="max_length",
             return_attention_mask=True,
         )
         batch = {
