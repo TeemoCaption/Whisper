@@ -12,7 +12,7 @@ whisper_train:
 
   peft:
     enabled: true
-    # 預設使用 adalora 對應自適應低秩適應；可切回 lora 做固定秩基線。
+    # 本專案只使用 adalora 對應自適應低秩適應。
     method: adalora
     # language 是每語言一組轉接模組；本檔作為語言 adapter 共用基底。
     adapter_scope: language
@@ -31,10 +31,6 @@ whisper_train:
       - fc2
     bias: none
     modules_to_save: []
-    lora:
-      r: 32
-      lora_alpha: 64
-      lora_dropout: 0.05
     adalora:
       init_r: 32
       target_r: 16
@@ -73,30 +69,27 @@ whisper_train:
   training:
     # 8GB VRAM 預設：降低單步批次，靠梯度累積維持有效批次。
     output_dir: artifacts/models/whisper_medium_adalora_8gb
-    max_train_samples:
-    max_eval_samples: 1000
-    num_train_epochs: 20.0
+    num_train_epochs: 10.0
     learning_rate: 1.0e-5
     lr_scheduler_type: linear
     warmup_steps: 500
     per_device_train_batch_size: 4
     per_device_eval_batch_size: 1
     gradient_accumulation_steps: 4
-    eval_strategy: steps
-    eval_steps: 1000
-    save_steps: 1000
+    eval_strategy: epoch
+    save_strategy: epoch
     logging_steps: 100
     eval_accumulation_steps: 16
     torch_empty_cache_steps: 100
     eval_do_concat_batches: false
     include_inputs_for_metrics: false
-    predict_with_generate: true
+    predict_with_generate: false
     generation_max_length: 96
     generation_num_beams: 1
     fp16: true
     save_total_limit: 2
     load_best_model_at_end: true
-    metric_for_best_model: cer
+    metric_for_best_model: eval_loss
     greater_is_better: false
     report_to:
       - wandb
@@ -111,28 +104,26 @@ whisper_train:
     disable_tqdm: false
     warmup_first_batch: true
 
-  language_classifier:
+  contrastive_router:
     enabled: true
     labels:
       - zh-TW
       - nan-tw
-    output_dir: artifacts/models/language_classifier_8gb
+    output_dir: artifacts/models/contrastive_router_8gb
     train_split: train
     eval_split: dev
     test_split: test
-    max_train_samples:
-    max_eval_samples: 2000
-    max_test_samples:
     num_train_epochs: 10.0
     learning_rate: 1.0e-4
     warmup_steps: 100
-    weight_decay: 0.01
+    weight_decay: 0.02
     max_grad_norm: 1.0
     pooling: attention
     attention_hidden_size: 256
+    embedding_size: 256
     hidden_ratio: 0.5
-    num_hidden_layers: 2
-    dropout: 0.1
+    dropout: 0.2
+    temperature: 0.1
     per_device_train_batch_size: 4
     per_device_eval_batch_size: 4
     dataloader_num_workers: 1
@@ -152,9 +143,9 @@ whisper_train:
     report_to:
       - wandb
     wandb_project: whisper-tw
-    run_name: whisper-medium-language-head-8gb
+    run_name: whisper-medium-contrastive-router-8gb
 
   early_stopping:
     enabled: true
-    patience: 3
+    patience: 2
     threshold: 0.0

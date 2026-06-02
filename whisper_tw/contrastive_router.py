@@ -5,17 +5,19 @@ from typing import Any
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 
 @dataclass(frozen=True)
-class LanguageClassifierSpec:
+class ContrastiveRouterSpec:
     labels: tuple[str, ...]
     hidden_size: int
     pooling: str = "attention"
     attention_hidden_size: int = 256
+    embedding_size: int = 256
     hidden_ratio: float = 0.5
-    num_hidden_layers: int = 2
     dropout: float = 0.1
+    temperature: float = 0.07
 
 
 class AttentionPooling(nn.Module):
@@ -37,61 +39,74 @@ class AttentionPooling(nn.Module):
         return (hidden_states * weights).sum(dim=1)
 
 
-class LanguageClassifierHead(nn.Module):
+class QueryProjection(nn.Module):
     def __init__(
         self,
         *,
         input_size: int,
-        num_labels: int,
+        embedding_size: int,
         hidden_ratio: float = 0.5,
-        num_hidden_layers: int = 2,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        hidden_size = max(num_labels * 4, int(input_size * float(hidden_ratio)))
-        depth = max(1, int(num_hidden_layers))
-
-        layers: list[nn.Module] = [nn.LayerNorm(input_size)]
-        current_size = input_size
-        for _ in range(depth):
-            layers.extend(
-                [
-                    nn.Linear(current_size, hidden_size),
-                    nn.GELU(),
-                    nn.Dropout(float(dropout)),
-                ]
-            )
-            current_size = hidden_size
-        layers.append(nn.Linear(current_size, num_labels))
-        self.net = nn.Sequential(*layers)
+        hidden_size = max(embedding_size, int(input_size * float(hidden_ratio)))
+        self.net = nn.Sequential(
+            nn.LayerNorm(input_size),
+            nn.Linear(input_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(hidden_size, embedding_size),
+        )
 
     def forward(self, pooled_states: torch.Tensor) -> torch.Tensor:
-        return self.net(pooled_states)
+        return F.normalize(self.net(pooled_states), dim=-1)
 
 
-class WhisperLanguageClassifier(nn.Module):
-    def __init__(self, spec: LanguageClassifierSpec) -> None:
+class ContrastiveAdapterRouter(nn.Module):
+    def __init__(self, spec: ContrastiveRouterSpec) -> None:
         super().__init__()
-        self.spec = spec
+        if len(spec.labels) < 2:
+            raise ValueError("對比式路由至少需要兩個語言標籤。")
         pooling = str(spec.pooling or "attention").lower()
         if pooling != "attention":
-            raise ValueError("語言分類頭目前只支援 attention 池化。")
+            raise ValueError("對比式路由目前只支援 attention 池化。")
+
+        self.spec = spec
         self.attention_pooling = AttentionPooling(
             spec.hidden_size,
             spec.attention_hidden_size,
         )
-        input_size = spec.hidden_size
-        self.head = LanguageClassifierHead(
-            input_size=input_size,
-            num_labels=len(spec.labels),
+        self.query_projection = QueryProjection(
+            input_size=spec.hidden_size,
+            embedding_size=spec.embedding_size,
             hidden_ratio=spec.hidden_ratio,
-            num_hidden_layers=spec.num_hidden_layers,
             dropout=spec.dropout,
         )
+        self.adapter_keys = nn.Parameter(
+            torch.empty(len(spec.labels), spec.embedding_size)
+        )
+        nn.init.xavier_uniform_(self.adapter_keys)
 
-    def forward(self, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, encoder_hidden_states: torch.Tensor) -> dict[str, torch.Tensor]:
         pooled = self.attention_pooling(encoder_hidden_states)
-        return self.head(pooled)
+        queries = self.query_projection(pooled.float())
+        keys = F.normalize(self.adapter_keys, dim=-1)
+        temperature = max(float(self.spec.temperature), 1e-6)
+        logits = queries @ keys.transpose(0, 1) / temperature
+        return {
+            "logits": logits,
+            "queries": queries,
+            "keys": keys,
+        }
+
+    def compute_loss(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        outputs = self(encoder_hidden_states)
+        loss = F.cross_entropy(outputs["logits"], labels)
+        return loss, outputs
 
     def checkpoint_payload(self) -> dict[str, Any]:
         return {
@@ -99,8 +114,9 @@ class WhisperLanguageClassifier(nn.Module):
             "hidden_size": int(self.spec.hidden_size),
             "pooling": self.spec.pooling,
             "attention_hidden_size": int(self.spec.attention_hidden_size),
+            "embedding_size": int(self.spec.embedding_size),
             "hidden_ratio": float(self.spec.hidden_ratio),
-            "num_hidden_layers": int(self.spec.num_hidden_layers),
             "dropout": float(self.spec.dropout),
+            "temperature": float(self.spec.temperature),
             "state_dict": self.state_dict(),
         }

@@ -4,20 +4,26 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import math
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
-import torch
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from whisper_tw.runtime_env import configure_runtime_environment
+
+configure_runtime_environment()
+
+print("初始化 AdaLoRA 訓練環境。", flush=True)
+import torch
+print("PyTorch 載入完成。", flush=True)
+
 from whisper_tw.config import load_config, resolve_common_voice_split_source
 from whisper_tw.data import load_audio_waveform, read_common_voice_split
-from whisper_tw.metrics import character_error_rate
 from whisper_tw.text_norm import build_text_normalizer
 
 try:
@@ -152,6 +158,20 @@ def _training_profile_name(output_dir: Path) -> str:
     return "local"
 
 
+LANGUAGE_TRAINING_DEFAULTS: dict[str, dict[str, Any]] = {
+    "zh-TW": {
+        "learning_rate": 1.0e-5,
+        "warmup_steps": 500,
+        "num_train_epochs": 10.0,
+    },
+    "nan-tw": {
+        "learning_rate": 8.0e-6,
+        "warmup_steps": 700,
+        "num_train_epochs": 12.0,
+    },
+}
+
+
 def apply_language_training_override(
     train_cfg: dict[str, Any],
     language: str | None,
@@ -179,6 +199,8 @@ def apply_language_training_override(
     data_cfg["language_filter"] = selected_language
 
     training_cfg = train_cfg.setdefault("training", {})
+    for key, value in LANGUAGE_TRAINING_DEFAULTS.get(selected_language, {}).items():
+        training_cfg[key] = value
     base_output_dir = Path(
         str(training_cfg.get("output_dir") or "artifacts/models/whisper_medium_adalora")
     )
@@ -306,34 +328,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
-def build_compute_metrics(processor, base_config: dict[str, Any]):
-    data_cfg = get_data_config(base_config)
-    normalizer = build_text_normalizer(
-        data_cfg.get("text_normalization")
-    )
-
-    def normalize(text: str) -> str:
-        value = str(text or "")
-        if not normalizer.enabled:
-            return value.strip()
-        return normalizer(value)
-
-    def compute_metrics(pred) -> dict[str, float]:
-        pred_ids = pred.predictions
-        if isinstance(pred_ids, tuple):
-            pred_ids = pred_ids[0]
-        label_ids = pred.label_ids.copy()
-        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-
-        pred_texts = processor.batch_decode(pred_ids, skip_special_tokens=True)
-        label_texts = processor.batch_decode(label_ids, skip_special_tokens=True)
-        predictions = [normalize(text) for text in pred_texts]
-        references = [normalize(text) for text in label_texts]
-        return {"cer": character_error_rate(predictions, references)}
-
-    return compute_metrics
-
-
 def get_whisper_encoder(model):
     candidates = [model]
     for attr in ("base_model", "model"):
@@ -401,83 +395,6 @@ def configure_encoder_trainability(
     }
 
 
-def build_training_arguments(training_cls, training_cfg: dict[str, Any], output_dir: Path):
-    kwargs: dict[str, Any] = {
-        "output_dir": str(output_dir),
-        "per_device_train_batch_size": int(
-            training_cfg.get("per_device_train_batch_size", 4)
-        ),
-        "per_device_eval_batch_size": int(
-            training_cfg.get("per_device_eval_batch_size", 4)
-        ),
-        "gradient_accumulation_steps": int(
-            training_cfg.get("gradient_accumulation_steps", 4)
-        ),
-        "learning_rate": float(training_cfg.get("learning_rate", 1.0e-5)),
-        "lr_scheduler_type": str(training_cfg.get("lr_scheduler_type", "linear")),
-        "warmup_steps": int(training_cfg.get("warmup_steps", 500)),
-        "num_train_epochs": float(training_cfg.get("num_train_epochs", 10.0)),
-        "fp16": bool(training_cfg.get("fp16", False)),
-        "bf16": bool(training_cfg.get("bf16", False)),
-        "save_steps": int(training_cfg.get("save_steps", 500)),
-        "logging_steps": int(training_cfg.get("logging_steps", 25)),
-        "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
-        "predict_with_generate": bool(training_cfg.get("predict_with_generate", True)),
-        "generation_max_length": int(training_cfg.get("generation_max_length", 192)),
-        "generation_num_beams": int(training_cfg.get("generation_num_beams", 1)),
-        "load_best_model_at_end": True,
-        "metric_for_best_model": str(training_cfg.get("metric_for_best_model", "cer")),
-        "greater_is_better": bool(training_cfg.get("greater_is_better", False)),
-        "report_to": list(training_cfg.get("report_to", [])),
-        "remove_unused_columns": False,
-        "dataloader_num_workers": int(training_cfg.get("dataloader_num_workers", 2)),
-        "disable_tqdm": bool(training_cfg.get("disable_tqdm", False)),
-    }
-
-    signature = inspect.signature(training_cls.__init__)
-    eval_strategy_key = (
-        "eval_strategy"
-        if "eval_strategy" in signature.parameters
-        else "evaluation_strategy"
-    )
-    kwargs[eval_strategy_key] = str(training_cfg.get("eval_strategy", "steps"))
-    kwargs["eval_steps"] = int(training_cfg.get("eval_steps", 500))
-    kwargs["logging_strategy"] = str(training_cfg.get("logging_strategy", "steps"))
-    kwargs["run_name"] = str(training_cfg.get("run_name") or output_dir.name)
-    optional_int_args = (
-        "dataloader_prefetch_factor",
-        "eval_accumulation_steps",
-        "torch_empty_cache_steps",
-    )
-    for key in optional_int_args:
-        value = training_cfg.get(key)
-        if value is not None:
-            kwargs[key] = int(value)
-    optional_bool_args = (
-        "batch_eval_metrics",
-        "dataloader_pin_memory",
-        "dataloader_persistent_workers",
-        "eval_do_concat_batches",
-        "include_inputs_for_metrics",
-        "tf32",
-        "torch_compile",
-    )
-    for key in optional_bool_args:
-        value = training_cfg.get(key)
-        if value is not None:
-            kwargs[key] = bool(value)
-    optional_str_args = ("optim",)
-    for key in optional_str_args:
-        value = training_cfg.get(key)
-        if value:
-            kwargs[key] = str(value)
-
-    supported_kwargs = {
-        key: value for key, value in kwargs.items() if key in signature.parameters
-    }
-    return training_cls(**supported_kwargs)
-
-
 def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) -> None:
     report_to = training_cfg.get("report_to", [])
     if isinstance(report_to, str):
@@ -502,19 +419,6 @@ def get_process_memory_mb() -> float | None:
         return None
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / 1024 / 1024
-
-
-def build_adalora_callback(trainer_callback_cls, peft_info: dict[str, Any]):
-    if str(peft_info.get("method") or "").lower() != "adalora":
-        return None
-
-    class AdaLoraRankAllocatorCallback(trainer_callback_cls):
-        def on_pre_optimizer_step(self, args, state, control, model=None, **kwargs):
-            if model is not None:
-                update_adalora_rank_allocation(model, int(state.global_step) + 1)
-            return control
-
-    return AdaLoraRankAllocatorCallback()
 
 
 def configure_gradient_checkpointing(model, model_cfg: dict[str, Any], peft_enabled: bool) -> None:
@@ -548,6 +452,317 @@ def maybe_warmup_first_batch(
     print("第一筆音訊預熱完成。", flush=True)
 
 
+def configure_torch_backend(training_cfg: dict[str, Any]) -> None:
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = bool(training_cfg.get("tf32", False))
+        torch.backends.cudnn.allow_tf32 = bool(training_cfg.get("tf32", False))
+
+
+def build_dataloader_kwargs(
+    training_cfg: dict[str, Any],
+    *,
+    batch_size_key: str,
+    shuffle: bool,
+) -> dict[str, Any]:
+    num_workers = max(0, int(training_cfg.get("dataloader_num_workers", 0)))
+    kwargs: dict[str, Any] = {
+        "batch_size": int(training_cfg.get(batch_size_key, 1)),
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": bool(training_cfg.get("dataloader_pin_memory", False))
+        and torch.cuda.is_available(),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(
+            training_cfg.get("dataloader_persistent_workers", False)
+        )
+        if training_cfg.get("dataloader_prefetch_factor") is not None:
+            kwargs["prefetch_factor"] = int(training_cfg["dataloader_prefetch_factor"])
+    return kwargs
+
+
+def move_batch_to_device(
+    batch: dict[str, torch.Tensor],
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    return {
+        key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
+        for key, value in batch.items()
+    }
+
+
+def autocast_context(
+    device: torch.device,
+    *,
+    fp16: bool,
+    bf16: bool,
+):
+    enabled = device.type == "cuda" and (fp16 or bf16)
+    dtype = torch.float16 if fp16 else torch.bfloat16
+    try:
+        return torch.amp.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+    except TypeError:
+        return torch.cuda.amp.autocast(dtype=dtype, enabled=enabled)
+
+
+def build_grad_scaler(device: torch.device, fp16: bool):
+    enabled = device.type == "cuda" and fp16
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def maybe_tqdm(iterable, *, total: int, desc: str, disabled: bool):
+    if disabled:
+        return iterable
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return iterable
+    return tqdm(iterable, total=total, desc=desc)
+
+
+def build_optimizer(model, training_cfg: dict[str, Any]) -> torch.optim.Optimizer:
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+    if not trainable_params:
+        raise ValueError("目前模型沒有可訓練參數，請檢查低秩設定或凍結設定。")
+    return torch.optim.AdamW(
+        trainable_params,
+        lr=float(training_cfg.get("learning_rate", 1.0e-5)),
+        weight_decay=float(training_cfg.get("weight_decay", 0.0)),
+    )
+
+
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    training_cfg: dict[str, Any],
+    *,
+    total_update_steps: int,
+):
+    scheduler_type = str(training_cfg.get("lr_scheduler_type", "linear")).lower()
+    warmup_steps = max(0, int(training_cfg.get("warmup_steps", 0)))
+    total_update_steps = max(1, int(total_update_steps))
+
+    def linear_lambda(current_step: int) -> float:
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        remaining_steps = total_update_steps - current_step
+        decay_steps = max(1, total_update_steps - warmup_steps)
+        return max(0.0, float(remaining_steps) / float(decay_steps))
+
+    def constant_lambda(current_step: int) -> float:
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return 1.0
+
+    if scheduler_type == "constant":
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, constant_lambda)
+    if scheduler_type != "linear":
+        print(
+            f"未支援的學習率排程 {scheduler_type!r}，改用線性排程。",
+            flush=True,
+        )
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, linear_lambda)
+
+
+def setup_wandb_run(
+    training_cfg: dict[str, Any],
+    output_dir: Path,
+    *,
+    run_config: dict[str, Any],
+):
+    report_to = training_cfg.get("report_to", [])
+    if isinstance(report_to, str):
+        enabled = report_to.lower() == "wandb"
+    else:
+        enabled = "wandb" in [str(item).lower() for item in report_to]
+    if not enabled:
+        return None
+    try:
+        import wandb
+    except ImportError:
+        print("已要求記錄到 wandb，但目前環境未安裝 wandb；略過線上紀錄。", flush=True)
+        return None
+    return wandb.init(
+        project=str(training_cfg.get("wandb_project") or "whisper-tw"),
+        name=str(training_cfg.get("run_name") or output_dir.name),
+        config=run_config,
+        dir=str(output_dir),
+    )
+
+
+def save_model_artifacts(model, processor, final_dir: Path, peft_info: dict[str, Any]) -> None:
+    final_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        model.save_pretrained(str(final_dir), safe_serialization=True)
+    except TypeError:
+        model.save_pretrained(str(final_dir))
+    processor.save_pretrained(str(final_dir))
+    if bool(peft_info.get("enabled", False)):
+        save_peft_artifacts(model, final_dir, peft_info)
+
+
+def is_better_metric(
+    value: float,
+    best_value: float | None,
+    *,
+    greater_is_better: bool,
+    threshold: float,
+) -> bool:
+    if best_value is None:
+        return True
+    if greater_is_better:
+        return value > best_value + threshold
+    return value < best_value - threshold
+
+
+def train_one_epoch(
+    *,
+    model,
+    train_loader,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler,
+    device: torch.device,
+    epoch: int,
+    total_epochs: int,
+    global_step: int,
+    training_cfg: dict[str, Any],
+    peft_info: dict[str, Any],
+    wandb_run,
+) -> tuple[int, float]:
+    model.train()
+    gradient_accumulation_steps = max(
+        1,
+        int(training_cfg.get("gradient_accumulation_steps", 1)),
+    )
+    logging_steps = max(1, int(training_cfg.get("logging_steps", 50)))
+    max_grad_norm = float(training_cfg.get("max_grad_norm", 1.0))
+    empty_cache_steps = int(training_cfg.get("torch_empty_cache_steps", 0) or 0)
+    use_fp16 = bool(training_cfg.get("fp16", False))
+    use_bf16 = bool(training_cfg.get("bf16", False)) and not use_fp16
+    disable_tqdm = bool(training_cfg.get("disable_tqdm", False))
+
+    optimizer.zero_grad(set_to_none=True)
+    total_loss = 0.0
+    recent_loss = 0.0
+    recent_count = 0
+    progress = maybe_tqdm(
+        train_loader,
+        total=len(train_loader),
+        desc=f"epoch {epoch}/{total_epochs} train",
+        disabled=disable_tqdm,
+    )
+    for batch_index, batch in enumerate(progress, start=1):
+        batch = move_batch_to_device(batch, device)
+        with autocast_context(device, fp16=use_fp16, bf16=use_bf16):
+            loss = model(**batch).loss
+            scaled_loss = loss / gradient_accumulation_steps
+
+        if scaler.is_enabled():
+            scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
+
+        loss_value = float(loss.detach().cpu())
+        total_loss += loss_value
+        recent_loss += loss_value
+        recent_count += 1
+
+        should_step = (
+            batch_index % gradient_accumulation_steps == 0
+            or batch_index == len(train_loader)
+        )
+        if not should_step:
+            continue
+
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [param for param in model.parameters() if param.requires_grad],
+                max_grad_norm,
+            )
+
+        next_global_step = global_step + 1
+        if str(peft_info.get("method") or "").lower() == "adalora":
+            update_adalora_rank_allocation(model, next_global_step)
+
+        if scaler.is_enabled():
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        global_step = next_global_step
+
+        if hasattr(progress, "set_postfix"):
+            progress.set_postfix(
+                {
+                    "loss": f"{total_loss / batch_index:.4f}",
+                    "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                }
+            )
+
+        if global_step % logging_steps == 0:
+            metrics = {
+                "train/loss": recent_loss / max(1, recent_count),
+                "train/learning_rate": scheduler.get_last_lr()[0],
+                "train/epoch": epoch,
+                "train/global_step": global_step,
+            }
+            print(json.dumps({"stage": "train_step", **metrics}, ensure_ascii=False), flush=True)
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=global_step)
+            recent_loss = 0.0
+            recent_count = 0
+
+        if empty_cache_steps > 0 and global_step % empty_cache_steps == 0 and device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    return global_step, total_loss / max(1, len(train_loader))
+
+
+@torch.no_grad()
+def evaluate_loss(
+    *,
+    model,
+    eval_loader,
+    device: torch.device,
+    epoch: int,
+    training_cfg: dict[str, Any],
+) -> float:
+    model.eval()
+    use_fp16 = bool(training_cfg.get("fp16", False))
+    use_bf16 = bool(training_cfg.get("bf16", False)) and not use_fp16
+    disable_tqdm = bool(training_cfg.get("disable_tqdm", False))
+    empty_cache_steps = int(training_cfg.get("torch_empty_cache_steps", 0) or 0)
+
+    total_loss = 0.0
+    total_items = 0
+    progress = maybe_tqdm(
+        eval_loader,
+        total=len(eval_loader),
+        desc=f"epoch {epoch} eval",
+        disabled=disable_tqdm,
+    )
+    for batch_index, batch in enumerate(progress, start=1):
+        batch_size = int(batch["labels"].shape[0])
+        batch = move_batch_to_device(batch, device)
+        with autocast_context(device, fp16=use_fp16, bf16=use_bf16):
+            loss = model(**batch).loss
+        loss_value = float(loss.detach().cpu())
+        total_loss += loss_value * batch_size
+        total_items += batch_size
+        if hasattr(progress, "set_postfix"):
+            progress.set_postfix({"eval_loss": f"{total_loss / max(1, total_items):.4f}"})
+        if empty_cache_steps > 0 and batch_index % empty_cache_steps == 0 and device.type == "cuda":
+            torch.cuda.empty_cache()
+    return total_loss / max(1, total_items)
+
+
 def main(
     *,
     default_config: str = "configs/config.yaml",
@@ -558,16 +773,17 @@ def main(
     from transformers import (
         AutoModelForSpeechSeq2Seq,
         AutoProcessor,
-        EarlyStoppingCallback,
-        Seq2SeqTrainer,
-        Seq2SeqTrainingArguments,
-        TrainerCallback,
     )
 
     args = parse_args(
         default_config=default_config,
         description=description,
         include_language_arg=include_language_arg,
+    )
+    print(
+        f"啟動 AdaLoRA 訓練: config={args.config} "
+        f"language={getattr(args, 'language', None)}",
+        flush=True,
     )
     config = load_config(args.config)
     base_config_path = Path(str(config.get("base_config") or "configs/config.yaml"))
@@ -612,16 +828,19 @@ def main(
     eval_split = str(
         data_cfg.get("eval_split") or base_config.get("data", {}).get("dev_split", "dev")
     )
-    max_train_samples = training_cfg.get("max_train_samples")
-    max_eval_samples = training_cfg.get("max_eval_samples")
     output_dir = resolve_training_output_dir(train_cfg, model_name_or_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    configure_torch_backend(training_cfg)
 
+    print(f"載入 processor: {model_name_or_path}", flush=True)
     processor = AutoProcessor.from_pretrained(
         model_name_or_path,
         language=language,
         task=task,
     )
+    print(f"載入 Whisper 模型: {model_name_or_path}", flush=True)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name_or_path)
+    print("Whisper 模型載入完成。", flush=True)
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
     model.generation_config.language = language
@@ -653,7 +872,7 @@ def main(
         train_data_cfg=data_cfg,
         split=train_split,
         processor=processor,
-        max_samples=None if max_train_samples is None else int(max_train_samples),
+        max_samples=None,
         language_filter=language_filter,
     )
     eval_dataset = WhisperTrainingDataset(
@@ -661,7 +880,7 @@ def main(
         train_data_cfg=data_cfg,
         split=eval_split,
         processor=processor,
-        max_samples=None if max_eval_samples is None else int(max_eval_samples),
+        max_samples=None,
         language_filter=language_filter,
     )
     if len(train_dataset) == 0:
@@ -689,40 +908,55 @@ def main(
     maybe_warmup_first_batch(train_dataset, eval_dataset, training_cfg)
 
     configure_wandb_environment(training_cfg, output_dir)
-    training_args = build_training_arguments(
-        Seq2SeqTrainingArguments,
-        training_cfg,
-        output_dir,
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        collate_fn=data_collator,
+        **build_dataloader_kwargs(
+            training_cfg,
+            batch_size_key="per_device_train_batch_size",
+            shuffle=True,
+        ),
     )
-    callbacks = []
-    if bool(early_stopping_cfg.get("enabled", True)):
-        callbacks.append(
-            EarlyStoppingCallback(
-                early_stopping_patience=int(early_stopping_cfg.get("patience", 3)),
-                early_stopping_threshold=float(
-                    early_stopping_cfg.get("threshold", 0.0)
-                ),
-            )
+    eval_loader = torch.utils.data.DataLoader(
+        eval_dataset,
+        collate_fn=data_collator,
+        **build_dataloader_kwargs(
+            training_cfg,
+            batch_size_key="per_device_eval_batch_size",
+            shuffle=False,
+        ),
+    )
+    total_epochs = max(1, int(float(training_cfg.get("num_train_epochs", 10.0))))
+    gradient_accumulation_steps = max(
+        1,
+        int(training_cfg.get("gradient_accumulation_steps", 1)),
+    )
+    updates_per_epoch = math.ceil(len(train_loader) / gradient_accumulation_steps)
+    total_update_steps = max(1, updates_per_epoch * total_epochs)
+    optimizer = build_optimizer(model, training_cfg)
+    scheduler = build_lr_scheduler(
+        optimizer,
+        training_cfg,
+        total_update_steps=total_update_steps,
+    )
+    use_fp16 = bool(training_cfg.get("fp16", False))
+    use_bf16 = bool(training_cfg.get("bf16", False)) and not use_fp16
+    scaler = build_grad_scaler(device, use_fp16)
+    metric_for_best_model = str(training_cfg.get("metric_for_best_model", "eval_loss"))
+    if metric_for_best_model != "eval_loss":
+        print(
+            f"目前手寫訓練迴圈以 eval_loss 選最佳模型，忽略設定中的 {metric_for_best_model!r}。",
+            flush=True,
         )
-    adalora_callback = build_adalora_callback(TrainerCallback, peft_info)
-    if adalora_callback is not None:
-        callbacks.append(adalora_callback)
-
-    trainer_kwargs: dict[str, Any] = {
-        "args": training_args,
-        "model": model,
-        "train_dataset": train_dataset,
-        "eval_dataset": eval_dataset,
-        "data_collator": DataCollatorSpeechSeq2SeqWithPadding(processor),
-        "compute_metrics": build_compute_metrics(processor, base_config),
-        "callbacks": callbacks,
-    }
-    trainer_signature = inspect.signature(Seq2SeqTrainer.__init__)
-    if "processing_class" in trainer_signature.parameters:
-        trainer_kwargs["processing_class"] = processor
-    else:
-        trainer_kwargs["tokenizer"] = processor
-    trainer = Seq2SeqTrainer(**trainer_kwargs)
+        metric_for_best_model = "eval_loss"
+    greater_is_better = bool(training_cfg.get("greater_is_better", False))
+    early_stopping_enabled = bool(early_stopping_cfg.get("enabled", True))
+    early_stopping_patience = int(early_stopping_cfg.get("patience", 3))
+    early_stopping_threshold = float(early_stopping_cfg.get("threshold", 0.0))
+    final_dir = output_dir / "final"
 
     print(
         json.dumps(
@@ -735,11 +969,32 @@ def main(
                 "language_filter": language_filter,
                 "selected_adapter": selected_adapter,
                 "output_dir": str(output_dir),
-                "final_dir": str(output_dir / "final"),
+                "final_dir": str(final_dir),
                 "train_samples": len(train_dataset),
                 "eval_samples": len(eval_dataset),
-                "metric_for_best_model": training_args.metric_for_best_model,
-                "load_best_model_at_end": training_args.load_best_model_at_end,
+                "train_batches_per_epoch": len(train_loader),
+                "eval_batches_per_epoch": len(eval_loader),
+                "updates_per_epoch": updates_per_epoch,
+                "total_update_steps": total_update_steps,
+                "device": str(device),
+                "fp16": use_fp16,
+                "bf16": use_bf16,
+                "training_hyperparameters": {
+                    "num_train_epochs": total_epochs,
+                    "learning_rate": float(training_cfg.get("learning_rate", 1.0e-5)),
+                    "warmup_steps": int(training_cfg.get("warmup_steps", 0)),
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                    "per_device_train_batch_size": int(
+                        training_cfg.get("per_device_train_batch_size", 1)
+                    ),
+                    "per_device_eval_batch_size": int(
+                        training_cfg.get("per_device_eval_batch_size", 1)
+                    ),
+                },
+                "metric_for_best_model": metric_for_best_model,
+                "load_best_model_at_end": bool(
+                    training_cfg.get("load_best_model_at_end", True)
+                ),
                 "freeze_encoder": freeze_encoder,
                 "train_decoder": train_decoder,
                 "peft": peft_info,
@@ -761,31 +1016,131 @@ def main(
         flush=True,
     )
 
-    print("開始訓練；若進度停在 0%，通常是在解碼第一批音訊與建立特徵。", flush=True)
-    trainer.train()
+    wandb_run = setup_wandb_run(
+        training_cfg,
+        output_dir,
+        run_config={
+            "config": args.config,
+            "language": getattr(args, "language", None),
+            "train_samples": len(train_dataset),
+            "eval_samples": len(eval_dataset),
+            "total_epochs": total_epochs,
+            "total_update_steps": total_update_steps,
+            "peft": peft_info,
+        },
+    )
 
-    final_dir = output_dir / "final"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    trainer.save_model(str(final_dir))
-    processor.save_pretrained(str(final_dir))
-    if bool(peft_info.get("enabled", False)):
-        save_peft_artifacts(trainer.model, final_dir, peft_info)
+    best_metric: float | None = None
+    best_epoch: int | None = None
+    best_global_step: int | None = None
+    stale_epochs = 0
+    history: list[dict[str, Any]] = []
+    global_step = 0
+
+    for epoch in range(1, total_epochs + 1):
+        global_step, train_loss = train_one_epoch(
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            device=device,
+            epoch=epoch,
+            total_epochs=total_epochs,
+            global_step=global_step,
+            training_cfg=training_cfg,
+            peft_info=peft_info,
+            wandb_run=wandb_run,
+        )
+        eval_loss = evaluate_loss(
+            model=model,
+            eval_loader=eval_loader,
+            device=device,
+            epoch=epoch,
+            training_cfg=training_cfg,
+        )
+        improved = is_better_metric(
+            eval_loss,
+            best_metric,
+            greater_is_better=greater_is_better,
+            threshold=early_stopping_threshold,
+        )
+        if improved:
+            best_metric = eval_loss
+            best_epoch = epoch
+            best_global_step = global_step
+            stale_epochs = 0
+            save_model_artifacts(model, processor, final_dir, peft_info)
+        else:
+            stale_epochs += 1
+
+        epoch_metrics = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "train_loss": train_loss,
+            "eval_loss": eval_loss,
+            "best_eval_loss": best_metric,
+            "best_epoch": best_epoch,
+            "stale_epochs": stale_epochs,
+            "learning_rate": scheduler.get_last_lr()[0],
+            "saved_best": improved,
+        }
+        history.append(epoch_metrics)
+        print(json.dumps({"stage": "epoch_end", **epoch_metrics}, ensure_ascii=False), flush=True)
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "epoch": epoch,
+                    "train/loss_epoch": train_loss,
+                    "eval/loss": eval_loss,
+                    "eval/best_loss": best_metric,
+                    "train/global_step": global_step,
+                },
+                step=global_step,
+            )
+
+        if (
+            early_stopping_enabled
+            and stale_epochs >= early_stopping_patience
+        ):
+            print(
+                json.dumps(
+                    {
+                        "stage": "early_stopping",
+                        "epoch": epoch,
+                        "metric": metric_for_best_model,
+                        "best_metric": best_metric,
+                        "stale_epochs": stale_epochs,
+                        "patience": early_stopping_patience,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            break
+
+    if best_metric is None:
+        save_model_artifacts(model, processor, final_dir, peft_info)
 
     summary = {
-        "best_model_checkpoint": trainer.state.best_model_checkpoint,
-        "best_metric": trainer.state.best_metric,
-        "metric_for_best_model": training_args.metric_for_best_model,
+        "best_model_checkpoint": str(final_dir),
+        "best_metric": best_metric,
+        "best_epoch": best_epoch,
+        "best_global_step": best_global_step,
+        "metric_for_best_model": metric_for_best_model,
         "final_dir": str(final_dir),
         "peft": peft_info,
+        "history": history,
     }
     (output_dir / "best_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    if wandb_run is not None:
+        wandb_run.finish()
     print(
         "已保存 Whisper AdaLoRA BEST 權重: "
-        f"{final_dir} best_checkpoint={trainer.state.best_model_checkpoint} "
-        f"best_metric={trainer.state.best_metric}",
+        f"{final_dir} best_epoch={best_epoch} best_metric={best_metric}",
         flush=True,
     )
 

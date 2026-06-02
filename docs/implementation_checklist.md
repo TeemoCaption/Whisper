@@ -13,26 +13,25 @@
 ## 二、兩篇論文方法改良
 
 - 已固定底座為 `openai/whisper-medium`。
-- 已在 `scripts/lora_adapters.py` 支援固定秩低秩適應與自適應低秩適應。
+- 已在 `scripts/lora_adapters.py` 只保留自適應低秩適應。
 - `configs/config.yaml` 預設使用 `adalora`，對應自適應低秩主方法。
 - `configs/config.yaml` 是 8GB VRAM 訓練配置；`configs/config_h100.yaml` 是 H100 訓練配置，兩者模型、資料與低秩方法一致，只差資源相關訓練欄位。
 - `configs/config.yaml` 與 `configs/config_h100.yaml` 都明確設定 `disable_tqdm: false`，保留訓練與評估進度條。
-- 已保留 `lora` 設定，可切換為固定秩低秩對照組。
 - 已定義 `zh-TW -> zh_tw` 與 `nan-tw -> nan_tw` 語言專屬轉接模組，對應 LoRA-Whisper 的多語言擴充方向。
 
-## 三、語言專屬 AdaLoRA 與語言分類頭設計
+## 三、語言專屬 AdaLoRA 與對比式路由設計
 
 - 低秩訓練設定只保留 `configs/config.yaml` 與 `configs/config_h100.yaml`。
 - 語言專屬 AdaLoRA 不再靠多份設定檔；改由 `scripts/train.py --language zh-TW|nan-tw` 動態指定 `active_language`、`language_filter`、輸出資料夾與 wandb run name。
 - 新增語言時只需新增對應語言 adapter 設定與資料篩選，不需重新訓練 Whisper 底座。
-- 已新增 `whisper_tw/lang_classifier.py`，使用 Whisper encoder 表示的注意力池化，再接兩層 MLP 分類頭。
-- 已新增 `scripts/train_lang_classifier.py`，可用同一份 `config.yaml` 或 `config_h100.yaml` 訓練語言分類頭，推論時用分類結果選擇對應 adapter。
+- 已新增 `whisper_tw/contrastive_router.py`，使用 Whisper encoder 表示產生查詢向量，並和語言 adapter 鑰匙向量比對。
+- 已新增 `scripts/train_contrastive_router.py`，可用同一份 `config.yaml` 或 `config_h100.yaml` 訓練對比式鑰匙查詢路由，推論時用最匹配結果選擇對應 adapter。
 
 ## 四、核心概念對齊
 
 - 已建立 `docs/language_adalora_method.md`，說明語言專屬 AdaLoRA 如何對齊兩篇論文。
 - 已保留單一主訓練入口：`scripts/train.py` 是語言專屬 AdaLoRA 訓練程式。
-- 已在 `README.md` 放入資料準備、欄位檢查、語言分類頭訓練、語言專屬低秩訓練與總檢查指令。
+- 已在 `README.md` 放入資料準備、欄位檢查、對比式路由訓練、語言專屬低秩訓練與總檢查指令。
 
 ## 五、總檢查
 

@@ -13,7 +13,7 @@
 
 第一篇客語低資源論文的可借鑑點是自適應低秩適應。本專案使用 `AdaLoRA`，讓每個 adapter 內部的低秩容量可依訓練訊號動態分配，而不是固定 rank。
 
-第二篇 LoRA-Whisper 的可借鑑點是共享 Whisper 底座，並用語言專屬 adapter 擴充多語言辨識能力。本專案採用相同擴充方向，但將固定秩 LoRA 改為語言專屬 AdaLoRA：
+第二篇 LoRA-Whisper 的可借鑑點是共享 Whisper 底座，並用語言專屬 adapter 擴充多語言辨識能力。本專案採用相同擴充方向，但只保留語言專屬 AdaLoRA：
 
 ```text
 shared Whisper-medium backbone
@@ -23,7 +23,7 @@ shared Whisper-medium backbone
 
 新增語言時不重新訓練 Whisper 底座，只新增該語言的 adapter 設定與訓練資料篩選。
 
-推論時先用 Whisper encoder 的凍結表示訓練一個輕量語言分類頭，預測輸入音訊是 `zh-TW` 或 `nan-tw`，再選擇對應 adapter。分類頭使用注意力池化，讓模型自行加權較有語言辨識線索的時間片段，再接兩層 MLP；這比固定平均整段音訊更能保留有效語音線索。
+推論時先用 Whisper encoder 的凍結表示訓練對比式鑰匙查詢路由。輸入音訊會產生查詢向量，每個語言 adapter 對應一個可學習鑰匙向量；路由訓練讓查詢向量接近正確語言鑰匙並遠離其他語言鑰匙，推論時選擇最匹配的 adapter。
 
 ## 設定方式
 
@@ -58,7 +58,7 @@ python scripts/train.py --config configs/config_h100.yaml --language nan-tw
 ## 建議實驗順序
 
 1. 執行 `scripts/prepare_cv.py` 產生整併 TSV。
-2. 執行 `scripts/train_lang_classifier.py --config configs/config.yaml` 訓練語言分類頭。
+2. 執行 `scripts/train_contrastive_router.py --config configs/config.yaml` 訓練對比式鑰匙查詢路由。
 3. 執行 `scripts/train.py --config configs/config.yaml --language zh-TW` 訓練華語 adapter。
 4. 執行 `scripts/train.py --config configs/config.yaml --language nan-tw` 訓練台語 adapter。
 

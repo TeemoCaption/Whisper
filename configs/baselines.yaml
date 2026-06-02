@@ -1,30 +1,39 @@
 baselines:
-  - name: whisper_tw
-    enabled: false
-    type: whisper_tw
-    checkpoint:
+  - name: adalora_zh_tw
+    enabled: true
+    type: adalora_adapter
+    language: zh-TW
     device: cuda
 
-  - name: whisper_medium
+  - name: router_full
+    enabled: false
+    type: adalora_router
+    device: cuda
+
+  - name: whisper_medium_zh_tw
     enabled: false
     type: hf_whisper
     model_name_or_path: openai/whisper-medium
+    language_filter: zh-TW
     device: cuda
 
-  - name: whisper_large_v3_turbo
+  - name: whisper_large_v3_turbo_zh_tw
     enabled: false
     type: hf_whisper
     model_name_or_path: openai/whisper-large-v3-turbo
+    language_filter: zh-TW
     device: cuda
 
-  - name: whisper_medium_ft
-    enabled: true
+  - name: whisper_medium_ft_zh_tw
+    enabled: false
     type: hf_whisper
     model_name_or_path: artifacts/baselines/whisper_medium_ft/final
+    language_filter: zh-TW
     device: cuda
 
-  - name: breeze_asr_25
+  - name: breeze_asr_25_zh_tw
     enabled: false
     type: hf_whisper
     model_name_or_path: MediaTek-Research/Breeze-ASR-25
+    language_filter: zh-TW
     device: cuda

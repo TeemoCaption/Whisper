@@ -9,27 +9,32 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-import torch
-from torch.utils.data import DataLoader, Dataset
-from tqdm.auto import tqdm
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from whisper_tw.runtime_env import configure_runtime_environment
+
+configure_runtime_environment()
+
+import torch
+from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
+
 from whisper_tw.config import load_config, resolve_common_voice_split_source
-from whisper_tw.data import load_audio_waveform, read_common_voice_split
-from whisper_tw.lang_classifier import (
-    LanguageClassifierSpec,
-    WhisperLanguageClassifier,
+from whisper_tw.contrastive_router import (
+    ContrastiveAdapterRouter,
+    ContrastiveRouterSpec,
 )
+from whisper_tw.data import load_audio_waveform, read_common_voice_split
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="訓練 Whisper 編碼器語言分類頭。")
+    parser = argparse.ArgumentParser(description="訓練對比式鑰匙查詢路由。")
     parser.add_argument("--config", default="configs/config.yaml", help="訓練設定檔。")
     parser.add_argument("--max-train-samples", type=int, help="覆寫訓練樣本上限。")
     parser.add_argument("--max-eval-samples", type=int, help="覆寫驗證樣本上限。")
+    parser.add_argument("--max-test-samples", type=int, help="覆寫測試樣本上限。")
     parser.add_argument("--num-epochs", type=float, help="覆寫訓練週期數。")
     return parser.parse_args()
 
@@ -51,7 +56,7 @@ def resolve_split_source(data_cfg: dict[str, Any], split: str) -> str | Path:
     return resolve_common_voice_split_source(data_cfg, split)
 
 
-class LanguageDataset(Dataset):
+class RouterDataset(Dataset):
     def __init__(
         self,
         *,
@@ -92,7 +97,7 @@ class LanguageDataset(Dataset):
         }
 
 
-class LanguageCollator:
+class RouterCollator:
     def __init__(self, processor) -> None:
         self.processor = processor
 
@@ -133,6 +138,8 @@ def compute_metrics(
     for pred, ref in zip(predictions, references):
         confusion[ref][pred] += 1
 
+    precision_scores: list[float] = []
+    recall_scores: list[float] = []
     f1_scores: list[float] = []
     for label_id in range(num_labels):
         tp = confusion[label_id][label_id]
@@ -141,11 +148,18 @@ def compute_metrics(
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
         f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+        precision_scores.append(precision)
+        recall_scores.append(recall)
         f1_scores.append(f1)
 
     return {
         "accuracy": correct / max(1, total),
+        "macro_precision": sum(precision_scores) / max(1, len(precision_scores)),
+        "macro_recall": sum(recall_scores) / max(1, len(recall_scores)),
         "macro_f1": sum(f1_scores) / max(1, len(f1_scores)),
+        "per_label_precision": precision_scores,
+        "per_label_recall": recall_scores,
+        "per_label_f1": f1_scores,
         "confusion_matrix": confusion,
     }
 
@@ -179,18 +193,18 @@ def save_confusion_matrix_artifacts(
 
         fig, ax = plt.subplots(figsize=(5.5, 4.8))
         image = ax.imshow(confusion_matrix, cmap="Blues")
-        ax.set_title(f"Language Confusion Matrix - {name}")
-        ax.set_xlabel("Predicted label")
+        ax.set_title(f"Contrastive Router Matrix - {name}")
+        ax.set_xlabel("Predicted adapter")
         ax.set_ylabel("True label")
         ax.set_xticks(range(len(labels)), labels=labels, rotation=30, ha="right")
         ax.set_yticks(range(len(labels)), labels=labels)
         fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
 
         max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 0
-        threshold = max_value / 2 if max_value else 0
+        midpoint = max_value / 2 if max_value else 0
         for row_index, row in enumerate(confusion_matrix):
             for col_index, value in enumerate(row):
-                color = "white" if value > threshold else "black"
+                color = "white" if value > midpoint else "black"
                 ax.text(
                     col_index,
                     row_index,
@@ -203,66 +217,14 @@ def save_confusion_matrix_artifacts(
         fig.savefig(png_path, dpi=160)
         plt.close(fig)
     except Exception as exc:
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-
-            cell_size = 120
-            label_width = 120
-            title_height = 70
-            axis_height = 80
-            size = len(labels)
-            width = label_width + cell_size * size + 30
-            height = title_height + cell_size * size + axis_height
-            image = Image.new("RGB", (width, height), "white")
-            draw = ImageDraw.Draw(image)
-            font = ImageFont.load_default()
-            max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 1
-            max_value = max(1, max_value)
-
-            draw.text((20, 20), f"Language Confusion Matrix - {name}", fill="black", font=font)
-            draw.text((label_width + 20, height - 45), "Predicted label", fill="black", font=font)
-            draw.text((10, title_height + 20), "True", fill="black", font=font)
-
-            for index, label in enumerate(labels):
-                x = label_width + index * cell_size + 20
-                draw.text((x, title_height - 25), label, fill="black", font=font)
-                y = title_height + index * cell_size + 45
-                draw.text((20, y), label, fill="black", font=font)
-
-            for row_index, row in enumerate(confusion_matrix):
-                for col_index, value in enumerate(row):
-                    ratio = float(value) / max_value
-                    blue = int(255 - 155 * ratio)
-                    fill = (blue, blue, 255)
-                    x0 = label_width + col_index * cell_size
-                    y0 = title_height + row_index * cell_size
-                    x1 = x0 + cell_size
-                    y1 = y0 + cell_size
-                    draw.rectangle((x0, y0, x1, y1), fill=fill, outline="black")
-                    text = str(value)
-                    text_box = draw.textbbox((0, 0), text, font=font)
-                    text_width = text_box[2] - text_box[0]
-                    text_height = text_box[3] - text_box[1]
-                    text_color = "white" if ratio > 0.55 else "black"
-                    draw.text(
-                        (
-                            x0 + (cell_size - text_width) / 2,
-                            y0 + (cell_size - text_height) / 2,
-                        ),
-                        text,
-                        fill=text_color,
-                        font=font,
-                    )
-            image.save(png_path)
-        except Exception as pillow_exc:
-            fallback_path = matrix_dir / f"{name}.txt"
-            fallback_path.write_text(
-                f"無法輸出混淆矩陣圖片: matplotlib={exc}; pillow={pillow_exc}\n"
-                + json.dumps(payload, ensure_ascii=False, indent=2)
-                + "\n",
-                encoding="utf-8",
-            )
-            png_path = fallback_path
+        fallback_path = matrix_dir / f"{name}.txt"
+        fallback_path.write_text(
+            f"無法輸出混淆矩陣圖片: {exc}\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        png_path = fallback_path
 
     return {
         "json": str(json_path),
@@ -273,19 +235,20 @@ def save_confusion_matrix_artifacts(
 def evaluate(
     *,
     encoder,
-    classifier: WhisperLanguageClassifier,
+    router: ContrastiveAdapterRouter,
     loader: DataLoader,
     device: torch.device,
     cfg: dict[str, Any],
-    criterion,
 ) -> dict[str, Any]:
-    classifier.eval()
+    router.eval()
     losses: list[float] = []
     predictions: list[int] = []
     references: list[int] = []
+    positive_similarities: list[float] = []
+    negative_similarities: list[float] = []
     progress = tqdm(
         loader,
-        desc="eval language head",
+        desc="eval contrastive router",
         disable=bool(cfg.get("disable_tqdm", False)),
     )
     with torch.no_grad():
@@ -294,18 +257,32 @@ def evaluate(
             labels = batch["labels"].to(device)
             with build_autocast(device, cfg):
                 hidden = encoder(input_features).last_hidden_state
-            logits = classifier(hidden.float())
-            loss = criterion(logits, labels)
+            loss, outputs = router.compute_loss(hidden.float(), labels)
+            logits = outputs["logits"]
+            similarities = outputs["queries"] @ outputs["keys"].transpose(0, 1)
             losses.append(float(loss.detach().cpu()))
             predictions.extend(logits.argmax(dim=-1).detach().cpu().tolist())
             references.extend(labels.detach().cpu().tolist())
 
+            row_ids = torch.arange(labels.size(0), device=device)
+            positive = similarities[row_ids, labels]
+            mask = torch.ones_like(similarities, dtype=torch.bool)
+            mask[row_ids, labels] = False
+            negative = similarities.masked_fill(~mask, float("-inf")).max(dim=-1).values
+            positive_similarities.extend(positive.detach().cpu().tolist())
+            negative_similarities.extend(negative.detach().cpu().tolist())
+
     metrics = compute_metrics(
         predictions,
         references,
-        num_labels=len(classifier.spec.labels),
+        num_labels=len(router.spec.labels),
     )
     metrics["loss"] = sum(losses) / max(1, len(losses))
+    avg_positive = sum(positive_similarities) / max(1, len(positive_similarities))
+    avg_negative = sum(negative_similarities) / max(1, len(negative_similarities))
+    metrics["avg_positive_similarity"] = avg_positive
+    metrics["avg_max_negative_similarity"] = avg_negative
+    metrics["avg_similarity_gap"] = avg_positive - avg_negative
     return metrics
 
 
@@ -344,133 +321,141 @@ def main() -> None:
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
     args = parse_args()
+    print(f"啟動對比式路由訓練: config={args.config}", flush=True)
     config = load_config(args.config)
     train_cfg = get_train_config(config)
     model_cfg = train_cfg.get("model", {}) or {}
     data_cfg = train_cfg.get("data", {}) or {}
-    cls_cfg = train_cfg.get("language_classifier", {}) or {}
-    if not bool(cls_cfg.get("enabled", True)):
-        raise ValueError("language_classifier.enabled 已關閉。")
+    router_cfg = train_cfg.get("contrastive_router", {}) or {}
+    if not bool(router_cfg.get("enabled", True)):
+        raise ValueError("contrastive_router.enabled 已關閉。")
 
-    labels = [str(label) for label in cls_cfg.get("labels", ["zh-TW", "nan-tw"])]
+    labels = [str(label) for label in router_cfg.get("labels", ["zh-TW", "nan-tw"])]
     model_name_or_path = str(
         model_cfg.get("model_name_or_path") or "openai/whisper-medium"
     )
-    output_dir = Path(str(cls_cfg.get("output_dir") or "artifacts/models/language_classifier"))
+    output_dir = Path(str(router_cfg.get("output_dir") or "artifacts/models/contrastive_router"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if bool(cls_cfg.get("tf32", False)) and torch.cuda.is_available():
+    if bool(router_cfg.get("tf32", False)) and torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
+    print(f"載入 processor: {model_name_or_path}", flush=True)
     processor = AutoProcessor.from_pretrained(
         model_name_or_path,
         language=str(model_cfg.get("language") or "zh"),
         task=str(model_cfg.get("task") or "transcribe"),
     )
+    print(f"載入 Whisper 模型: {model_name_or_path}", flush=True)
     whisper = AutoModelForSpeechSeq2Seq.from_pretrained(model_name_or_path).to(device)
+    print("Whisper 模型載入完成。", flush=True)
     whisper.eval()
     for param in whisper.parameters():
         param.requires_grad = False
     encoder = whisper.model.encoder
 
     hidden_size = int(getattr(whisper.config, "d_model", 1024))
-    spec = LanguageClassifierSpec(
+    spec = ContrastiveRouterSpec(
         labels=tuple(labels),
         hidden_size=hidden_size,
-        pooling=str(cls_cfg.get("pooling") or "attention"),
-        attention_hidden_size=int(cls_cfg.get("attention_hidden_size", 256)),
-        hidden_ratio=float(cls_cfg.get("hidden_ratio", 0.5)),
-        num_hidden_layers=int(cls_cfg.get("num_hidden_layers", 2)),
-        dropout=float(cls_cfg.get("dropout", 0.1)),
+        pooling=str(router_cfg.get("pooling") or "attention"),
+        attention_hidden_size=int(router_cfg.get("attention_hidden_size", 256)),
+        embedding_size=int(router_cfg.get("embedding_size", 256)),
+        hidden_ratio=float(router_cfg.get("hidden_ratio", 0.5)),
+        dropout=float(router_cfg.get("dropout", 0.1)),
+        temperature=float(router_cfg.get("temperature", 0.07)),
     )
-    classifier = WhisperLanguageClassifier(spec).to(device)
+    router = ContrastiveAdapterRouter(spec).to(device)
 
     max_train_samples = (
         args.max_train_samples
         if args.max_train_samples is not None
-        else cls_cfg.get("max_train_samples")
+        else router_cfg.get("max_train_samples")
     )
     max_eval_samples = (
         args.max_eval_samples
         if args.max_eval_samples is not None
-        else cls_cfg.get("max_eval_samples")
+        else router_cfg.get("max_eval_samples")
     )
-    max_test_samples = cls_cfg.get("max_test_samples")
-    train_dataset = LanguageDataset(
+    max_test_samples = (
+        args.max_test_samples
+        if args.max_test_samples is not None
+        else router_cfg.get("max_test_samples")
+    )
+    train_dataset = RouterDataset(
         data_cfg=data_cfg,
-        split=str(cls_cfg.get("train_split") or data_cfg.get("train_split", "train")),
+        split=str(router_cfg.get("train_split") or data_cfg.get("train_split", "train")),
         processor=processor,
         labels=labels,
         max_samples=None if max_train_samples is None else int(max_train_samples),
     )
-    eval_dataset = LanguageDataset(
+    eval_dataset = RouterDataset(
         data_cfg=data_cfg,
-        split=str(cls_cfg.get("eval_split") or data_cfg.get("eval_split", "dev")),
+        split=str(router_cfg.get("eval_split") or data_cfg.get("eval_split", "dev")),
         processor=processor,
         labels=labels,
         max_samples=None if max_eval_samples is None else int(max_eval_samples),
     )
-    test_dataset = LanguageDataset(
+    test_dataset = RouterDataset(
         data_cfg=data_cfg,
-        split=str(cls_cfg.get("test_split") or data_cfg.get("test_split", "test")),
+        split=str(router_cfg.get("test_split") or data_cfg.get("test_split", "test")),
         processor=processor,
         labels=labels,
         max_samples=None if max_test_samples is None else int(max_test_samples),
     )
     if len(train_dataset) == 0:
-        raise ValueError("語言分類頭訓練資料為空，請先檢查前處理後的 language_label。")
+        raise ValueError("對比式路由訓練資料為空，請先檢查前處理後的 language_label。")
     if len(eval_dataset) == 0:
-        raise ValueError("語言分類頭驗證資料為空，請先檢查前處理後的 language_label。")
+        raise ValueError("對比式路由驗證資料為空，請先檢查前處理後的 language_label。")
     if len(test_dataset) == 0:
-        raise ValueError("語言分類頭測試資料為空，請先檢查前處理後的 language_label。")
+        raise ValueError("對比式路由測試資料為空，請先檢查前處理後的 language_label。")
 
-    collator = LanguageCollator(processor)
-    num_workers = int(cls_cfg.get("dataloader_num_workers", 1))
+    collator = RouterCollator(processor)
+    num_workers = int(router_cfg.get("dataloader_num_workers", 1))
     loader_kwargs = {
         "collate_fn": collator,
         "num_workers": num_workers,
-        "pin_memory": bool(cls_cfg.get("dataloader_pin_memory", device.type == "cuda")),
+        "pin_memory": bool(router_cfg.get("dataloader_pin_memory", device.type == "cuda")),
     }
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = bool(
-            cls_cfg.get("dataloader_persistent_workers", False)
+            router_cfg.get("dataloader_persistent_workers", False)
         )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(cls_cfg.get("per_device_train_batch_size", 4)),
+        batch_size=int(router_cfg.get("per_device_train_batch_size", 4)),
         shuffle=True,
         **loader_kwargs,
     )
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=int(cls_cfg.get("per_device_eval_batch_size", 4)),
+        batch_size=int(router_cfg.get("per_device_eval_batch_size", 4)),
         shuffle=False,
         **loader_kwargs,
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=int(cls_cfg.get("per_device_eval_batch_size", 4)),
+        batch_size=int(router_cfg.get("per_device_eval_batch_size", 4)),
         shuffle=False,
         **loader_kwargs,
     )
 
-    criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
-        classifier.parameters(),
-        lr=float(cls_cfg.get("learning_rate", 1.0e-4)),
-        weight_decay=float(cls_cfg.get("weight_decay", 0.01)),
+        router.parameters(),
+        lr=float(router_cfg.get("learning_rate", 1.0e-4)),
+        weight_decay=float(router_cfg.get("weight_decay", 0.01)),
     )
-    epochs = float(args.num_epochs if args.num_epochs is not None else cls_cfg.get("num_train_epochs", 10.0))
+    epochs = float(args.num_epochs if args.num_epochs is not None else router_cfg.get("num_train_epochs", 10.0))
     update_steps = max(1, int(len(train_loader) * epochs))
-    warmup_steps = int(cls_cfg.get("warmup_steps", 100))
-    early_stopping_cfg = dict(cls_cfg.get("early_stopping") or {})
+    warmup_steps = int(router_cfg.get("warmup_steps", 100))
+    early_stopping_cfg = dict(router_cfg.get("early_stopping") or {})
     early_stopping_enabled = bool(early_stopping_cfg.get("enabled", True))
     early_stopping_patience = max(1, int(early_stopping_cfg.get("patience", 3)))
     early_stopping_min_delta = float(early_stopping_cfg.get("min_delta", 0.0))
     early_stopping_metric = str(early_stopping_cfg.get("metric") or "macro_f1")
     if early_stopping_metric != "macro_f1":
-        raise ValueError("分類頭早停目前只支援 macro_f1。")
+        raise ValueError("對比式路由早停目前只支援 macro_f1。")
 
     def lr_lambda(step: int) -> float:
         if warmup_steps > 0 and step < warmup_steps:
@@ -479,7 +464,7 @@ def main() -> None:
         return max(0.0, (update_steps - step) / remaining)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    wandb_run = init_wandb(cls_cfg, output_dir)
+    wandb_run = init_wandb(router_cfg, output_dir)
 
     print(
         json.dumps(
@@ -492,12 +477,13 @@ def main() -> None:
                 "test_samples": len(test_dataset),
                 "output_dir": str(output_dir),
                 "device": str(device),
-                "classifier": {
+                "router": {
                     "pooling": spec.pooling,
                     "attention_hidden_size": spec.attention_hidden_size,
+                    "embedding_size": spec.embedding_size,
                     "hidden_ratio": spec.hidden_ratio,
-                    "num_hidden_layers": spec.num_hidden_layers,
                     "dropout": spec.dropout,
+                    "temperature": spec.temperature,
                 },
                 "early_stopping": {
                     "enabled": early_stopping_enabled,
@@ -516,12 +502,12 @@ def main() -> None:
     stale_epochs = 0
     full_epochs = max(1, int(epochs))
     for epoch in range(1, full_epochs + 1):
-        classifier.train()
+        router.train()
         losses: list[float] = []
         progress = tqdm(
             train_loader,
-            desc=f"train language head {epoch}/{full_epochs}",
-            disable=bool(cls_cfg.get("disable_tqdm", False)),
+            desc=f"train contrastive router {epoch}/{full_epochs}",
+            disable=bool(router_cfg.get("disable_tqdm", False)),
         )
         for batch in progress:
             global_step += 1
@@ -529,14 +515,13 @@ def main() -> None:
             labels_tensor = batch["labels"].to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.no_grad():
-                with build_autocast(device, cls_cfg):
+                with build_autocast(device, router_cfg):
                     hidden = encoder(input_features).last_hidden_state
-            logits = classifier(hidden.float())
-            loss = criterion(logits, labels_tensor)
+            loss, _outputs = router.compute_loss(hidden.float(), labels_tensor)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
-                classifier.parameters(),
-                float(cls_cfg.get("max_grad_norm", 1.0)),
+                router.parameters(),
+                float(router_cfg.get("max_grad_norm", 1.0)),
             )
             optimizer.step()
             scheduler.step()
@@ -544,9 +529,9 @@ def main() -> None:
             losses.append(loss_value)
             progress.set_postfix(loss=f"{loss_value:.4f}")
             if (
-                bool(cls_cfg.get("log_step_loss", False))
+                bool(router_cfg.get("log_step_loss", False))
                 and wandb_run is not None
-                and global_step % int(cls_cfg.get("logging_steps", 25)) == 0
+                and global_step % int(router_cfg.get("logging_steps", 25)) == 0
             ):
                 wandb_run.log(
                     {
@@ -559,11 +544,10 @@ def main() -> None:
 
         eval_metrics = evaluate(
             encoder=encoder,
-            classifier=classifier,
+            router=router,
             loader=eval_loader,
             device=device,
-            cfg=cls_cfg,
-            criterion=criterion,
+            cfg=router_cfg,
         )
         train_loss = sum(losses) / max(1, len(losses))
         metrics = {
@@ -584,7 +568,7 @@ def main() -> None:
         if improved:
             best_macro_f1 = current_macro_f1
             stale_epochs = 0
-            payload = classifier.checkpoint_payload()
+            payload = router.checkpoint_payload()
             payload.update(
                 {
                     "model_name_or_path": model_name_or_path,
@@ -592,7 +576,7 @@ def main() -> None:
                     "epoch": epoch,
                 }
             )
-            torch.save(payload, output_dir / "language_classifier.pt")
+            torch.save(payload, output_dir / "contrastive_router.pt")
             (output_dir / "metrics.json").write_text(
                 json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -617,17 +601,20 @@ def main() -> None:
             )
             break
 
-    best_checkpoint_path = output_dir / "language_classifier.pt"
+    best_checkpoint_path = output_dir / "contrastive_router.pt"
     if best_checkpoint_path.exists():
-        best_payload = torch.load(best_checkpoint_path, map_location=device)
-        classifier.load_state_dict(best_payload["state_dict"])
+        best_payload = torch.load(
+            best_checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+        router.load_state_dict(best_payload["state_dict"])
     test_metrics = evaluate(
         encoder=encoder,
-        classifier=classifier,
+        router=router,
         loader=test_loader,
         device=device,
-        cfg=cls_cfg,
-        criterion=criterion,
+        cfg=router_cfg,
     )
     test_confusion_paths = save_confusion_matrix_artifacts(
         confusion_matrix=test_metrics["confusion_matrix"],
@@ -657,7 +644,7 @@ def main() -> None:
 
     if wandb_run is not None:
         wandb_run.finish()
-    print(f"已保存最佳語言分類頭: {output_dir / 'language_classifier.pt'}", flush=True)
+    print(f"已保存最佳對比式路由: {output_dir / 'contrastive_router.pt'}", flush=True)
 
 
 if __name__ == "__main__":

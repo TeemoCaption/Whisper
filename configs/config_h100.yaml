@@ -29,10 +29,6 @@ whisper_train:
       - fc2
     bias: none
     modules_to_save: []
-    lora:
-      r: 32
-      lora_alpha: 64
-      lora_dropout: 0.05
     adalora:
       init_r: 32
       target_r: 16
@@ -71,8 +67,6 @@ whisper_train:
   training:
     # H100 建議設定：模型與低秩方法不變，只提高吞吐。
     output_dir: artifacts/models/whisper_medium_adalora_h100
-    max_train_samples:
-    max_eval_samples:
     num_train_epochs: 10.0
     learning_rate: 1.0e-5
     lr_scheduler_type: linear
@@ -80,17 +74,17 @@ whisper_train:
     per_device_train_batch_size: 16
     per_device_eval_batch_size: 16
     gradient_accumulation_steps: 1
-    eval_strategy: steps
-    eval_steps: 500
-    save_steps: 500
+    eval_strategy: epoch
+    save_strategy: epoch
     logging_steps: 25
     generation_max_length: 192
     generation_num_beams: 1
+    predict_with_generate: false
     fp16: false
     bf16: true
     save_total_limit: 2
     load_best_model_at_end: true
-    metric_for_best_model: cer
+    metric_for_best_model: eval_loss
     greater_is_better: false
     report_to:
       - wandb
@@ -100,28 +94,26 @@ whisper_train:
     dataloader_num_workers: 4
     disable_tqdm: false
 
-  language_classifier:
+  contrastive_router:
     enabled: true
     labels:
       - zh-TW
       - nan-tw
-    output_dir: artifacts/models/language_classifier_h100
+    output_dir: artifacts/models/contrastive_router_h100
     train_split: train
     eval_split: dev
     test_split: test
-    max_train_samples:
-    max_eval_samples:
-    max_test_samples:
     num_train_epochs: 10.0
     learning_rate: 1.0e-4
     warmup_steps: 100
-    weight_decay: 0.01
+    weight_decay: 0.02
     max_grad_norm: 1.0
     pooling: attention
     attention_hidden_size: 256
+    embedding_size: 256
     hidden_ratio: 0.5
-    num_hidden_layers: 2
-    dropout: 0.1
+    dropout: 0.2
+    temperature: 0.1
     per_device_train_batch_size: 32
     per_device_eval_batch_size: 32
     dataloader_num_workers: 4
@@ -141,9 +133,9 @@ whisper_train:
     report_to:
       - wandb
     wandb_project: whisper-tw
-    run_name: whisper-medium-language-head-h100
+    run_name: whisper-medium-contrastive-router-h100
 
   early_stopping:
     enabled: true
-    patience: 3
+    patience: 2
     threshold: 0.0

@@ -64,17 +64,20 @@ def resolve_adapter_names(peft_cfg: dict[str, Any]) -> dict[str, Any]:
 
 def _import_peft():
     try:
-        from peft import AdaLoraConfig, LoraConfig, get_peft_model
+        from peft import AdaLoraConfig, get_peft_model
     except ImportError as exc:
         raise ImportError(
             "需要安裝 peft 才能啟用低秩適應；請先執行 pip install -r requirements.txt。"
         ) from exc
-    return AdaLoraConfig, LoraConfig, get_peft_model
+    return AdaLoraConfig, get_peft_model
 
 
 def build_peft_config(peft_cfg: dict[str, Any]):
-    AdaLoraConfig, LoraConfig, _ = _import_peft()
-    method = str(peft_cfg.get("method") or "lora").strip().lower()
+    AdaLoraConfig, _ = _import_peft()
+    method = str(peft_cfg.get("method") or "adalora").strip().lower()
+    if method != "adalora":
+        raise ValueError("peft.method 目前只支援 adalora。")
+
     target_modules = list(peft_cfg.get("target_modules") or DEFAULT_TARGET_MODULES)
     common_kwargs: dict[str, Any] = {
         "target_modules": target_modules,
@@ -83,32 +86,22 @@ def build_peft_config(peft_cfg: dict[str, Any]):
         "modules_to_save": list(peft_cfg.get("modules_to_save") or []) or None,
     }
 
-    if method == "lora":
-        lora_cfg = dict(peft_cfg.get("lora") or {})
-        return LoraConfig(
-            r=int(lora_cfg.get("r", 32)),
-            lora_alpha=int(lora_cfg.get("lora_alpha", 64)),
-            lora_dropout=float(lora_cfg.get("lora_dropout", 0.05)),
-            **common_kwargs,
-        )
-    if method == "adalora":
-        adalora_cfg = dict(peft_cfg.get("adalora") or {})
-        kwargs = {
-            "init_r": int(adalora_cfg.get("init_r", 32)),
-            "target_r": int(adalora_cfg.get("target_r", 16)),
-            "beta1": float(adalora_cfg.get("beta1", 0.85)),
-            "beta2": float(adalora_cfg.get("beta2", 0.85)),
-            "tinit": int(adalora_cfg.get("tinit", 200)),
-            "tfinal": int(adalora_cfg.get("tfinal", 1000)),
-            "deltaT": int(adalora_cfg.get("deltaT", 10)),
-            "lora_alpha": int(adalora_cfg.get("lora_alpha", 64)),
-            "lora_dropout": float(adalora_cfg.get("lora_dropout", 0.05)),
-            **common_kwargs,
-        }
-        if adalora_cfg.get("total_step") is not None:
-            kwargs["total_step"] = int(adalora_cfg["total_step"])
-        return AdaLoraConfig(**kwargs)
-    raise ValueError("peft.method 只能是 lora 或 adalora。")
+    adalora_cfg = dict(peft_cfg.get("adalora") or {})
+    kwargs = {
+        "init_r": int(adalora_cfg.get("init_r", 32)),
+        "target_r": int(adalora_cfg.get("target_r", 16)),
+        "beta1": float(adalora_cfg.get("beta1", 0.85)),
+        "beta2": float(adalora_cfg.get("beta2", 0.85)),
+        "tinit": int(adalora_cfg.get("tinit", 200)),
+        "tfinal": int(adalora_cfg.get("tfinal", 1000)),
+        "deltaT": int(adalora_cfg.get("deltaT", 10)),
+        "lora_alpha": int(adalora_cfg.get("lora_alpha", 64)),
+        "lora_dropout": float(adalora_cfg.get("lora_dropout", 0.05)),
+        **common_kwargs,
+    }
+    if adalora_cfg.get("total_step") is not None:
+        kwargs["total_step"] = int(adalora_cfg["total_step"])
+    return AdaLoraConfig(**kwargs)
 
 
 def count_parameters(model) -> dict[str, int]:
@@ -121,7 +114,7 @@ def count_parameters(model) -> dict[str, int]:
 
 
 def apply_peft_adapters(model, peft_cfg: dict[str, Any]):
-    _, _, get_peft_model = _import_peft()
+    _, get_peft_model = _import_peft()
     adapter_info = resolve_adapter_names(peft_cfg)
     peft_config = build_peft_config(peft_cfg)
     active_adapter = adapter_info["active_adapter"]
@@ -129,7 +122,7 @@ def apply_peft_adapters(model, peft_cfg: dict[str, Any]):
     model = get_peft_model(model, peft_config, adapter_name=active_adapter)
     model.set_adapter(active_adapter)
 
-    method = str(peft_cfg.get("method") or "lora").strip().lower()
+    method = str(peft_cfg.get("method") or "adalora").strip().lower()
     adapter_info.update(
         {
             "enabled": True,
