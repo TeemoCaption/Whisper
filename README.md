@@ -88,6 +88,12 @@ python .\scripts\evaluate.py --config .\configs\config.yaml --mode single --lang
 python .\scripts\evaluate.py --config .\configs\config.yaml --mode router --split test
 ```
 
+若只要重跑訓練完成的對比式路由測試，不載入任何 LoRA adapter：
+
+```powershell
+python .\scripts\evaluate.py --config .\configs\config.yaml --mode router_metrics --split test
+```
+
 若要同時比較目前 adapter 與 `configs/baselines.yaml` 中啟用的 Whisper 基線：
 
 ```powershell

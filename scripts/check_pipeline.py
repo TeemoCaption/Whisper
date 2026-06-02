@@ -275,8 +275,14 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
-        'choices=["single", "router"]' in evaluate_script,
-        "evaluate.py 應提供 single 與 router 兩種評估模式。",
+        'choices=["single", "router", "router_metrics"]' in evaluate_script,
+        "evaluate.py 應提供 single、router_metrics 與 router 三種評估模式。",
+        failures,
+    )
+    require(
+        "def evaluate_router_metrics" in evaluate_script
+        and "avg_similarity_gap" in evaluate_script,
+        "evaluate.py 應提供不依賴 LoRA adapter 的路由器單獨評估。",
         failures,
     )
     require(

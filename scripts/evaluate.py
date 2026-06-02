@@ -39,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default="single",
-        choices=["single", "router"],
-        help="single 評估單一語言 adapter；router 評估完整路由。",
+        choices=["single", "router", "router_metrics"],
+        help="single 評估單一語言 adapter；router_metrics 評估路由器指標；router 評估完整路由。",
     )
     parser.add_argument(
         "--language",
@@ -773,6 +773,40 @@ def route_batch(
     return logits.argmax(dim=-1).detach().cpu().tolist(), time.perf_counter() - start
 
 
+def route_batch_with_scores(
+    *,
+    model,
+    router: ContrastiveAdapterRouter,
+    input_features: torch.Tensor,
+    reference_ids: torch.Tensor,
+    device: torch.device,
+    training_cfg: dict[str, Any],
+) -> tuple[list[int], float, list[float], list[float], float]:
+    encoder = get_whisper_encoder(model)
+    synchronize_for_timing(device)
+    start = time.perf_counter()
+    with torch.no_grad():
+        with build_autocast(device, training_cfg):
+            hidden = encoder(input_features).last_hidden_state
+        loss, outputs = router.compute_loss(hidden.float(), reference_ids)
+        logits = outputs["logits"]
+        similarities = outputs["queries"] @ outputs["keys"].transpose(0, 1)
+    synchronize_for_timing(device)
+
+    row_ids = torch.arange(reference_ids.size(0), device=device)
+    positive = similarities[row_ids, reference_ids]
+    mask = torch.ones_like(similarities, dtype=torch.bool)
+    mask[row_ids, reference_ids] = False
+    negative = similarities.masked_fill(~mask, float("-inf")).max(dim=-1).values
+    return (
+        logits.argmax(dim=-1).detach().cpu().tolist(),
+        time.perf_counter() - start,
+        positive.detach().cpu().tolist(),
+        negative.detach().cpu().tolist(),
+        float(loss.detach().cpu()),
+    )
+
+
 def wrong_languages_for(labels: list[str], references: list[str]) -> list[str]:
     wrong: list[str] = []
     for reference in references:
@@ -1004,6 +1038,147 @@ def evaluate_router(
     }
 
 
+def evaluate_router_metrics(
+    *,
+    config: dict[str, Any],
+    split: str,
+    max_samples: int | None,
+    batch_size: int | None,
+    device_name: str | None,
+    router_checkpoint: str | None = None,
+) -> dict[str, Any]:
+    train_cfg = get_train_config(config)
+    model_cfg = get_model_config(train_cfg)
+    data_cfg = get_data_config(train_cfg)
+    training_cfg = get_training_config(train_cfg)
+    device = resolve_device(train_cfg, device_name)
+    configure_torch_backend(training_cfg)
+
+    router_path = resolve_router_checkpoint(train_cfg, router_checkpoint)
+    router = load_router(router_path, device)
+    labels = list(router.spec.labels)
+    label_to_id = {label: index for index, label in enumerate(labels)}
+
+    processor = load_processor(model_cfg)
+    model = load_base_model(model_cfg, device, training_cfg).to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+
+    dataset = SpeechEvalDataset(
+        data_cfg=data_cfg,
+        split=split,
+        max_samples=max_samples,
+        allowed_languages=set(labels),
+    )
+    if len(dataset) == 0:
+        raise ValueError(f"{split} 切分中沒有符合路由標籤 {labels} 的樣本。")
+    dataloader = build_dataloader(
+        dataset=dataset,
+        processor=processor,
+        data_cfg=data_cfg,
+        training_cfg=training_cfg,
+        batch_size=default_eval_batch_size(training_cfg, batch_size),
+        device=device,
+    )
+
+    print(
+        f"eval_start mode=router_metrics split={split} samples={len(dataset)} "
+        f"router={router_path} labels={labels} device={device}",
+        flush=True,
+    )
+    reference_ids: list[int] = []
+    prediction_ids: list[int] = []
+    positive_similarities: list[float] = []
+    negative_similarities: list[float] = []
+    losses: list[float] = []
+    records: list[dict[str, Any]] = []
+    inference_seconds = 0.0
+    start = time.perf_counter()
+
+    with torch.inference_mode():
+        progress = tqdm(dataloader, desc="eval router metrics", dynamic_ncols=True)
+        for batch in progress:
+            input_features = batch["input_features"].to(device)
+            batch_reference_labels = [str(label) for label in batch["language_labels"]]
+            batch_reference_ids = torch.tensor(
+                [label_to_id[label] for label in batch_reference_labels],
+                dtype=torch.long,
+                device=device,
+            )
+            (
+                batch_prediction_ids,
+                batch_seconds,
+                batch_positive,
+                batch_negative,
+                batch_loss,
+            ) = route_batch_with_scores(
+                model=model,
+                router=router,
+                input_features=input_features,
+                reference_ids=batch_reference_ids,
+                device=device,
+                training_cfg=training_cfg,
+            )
+            inference_seconds += batch_seconds
+            losses.append(batch_loss)
+            positive_similarities.extend(batch_positive)
+            negative_similarities.extend(batch_negative)
+            prediction_ids.extend(batch_prediction_ids)
+            reference_ids.extend(batch_reference_ids.detach().cpu().tolist())
+
+            for index, reference_label in enumerate(batch_reference_labels):
+                predicted_label = labels[batch_prediction_ids[index]]
+                records.append(
+                    {
+                        "audio_path": batch["audio_paths"][index],
+                        "rel_path": batch["rel_paths"][index],
+                        "language_label": reference_label,
+                        "router_prediction": predicted_label,
+                        "duration_seconds": batch["duration_seconds"][index],
+                    }
+                )
+            progress.set_postfix(
+                samples=len(reference_ids),
+                acc=(
+                    f"{sum(int(p == r) for p, r in zip(prediction_ids, reference_ids)) / max(1, len(reference_ids)):.4f}"
+                ),
+            )
+
+    router_metrics = compute_classification_metrics(
+        prediction_ids,
+        reference_ids,
+        labels=labels,
+    )
+    total_audio_seconds = sum(float(record["duration_seconds"]) for record in records)
+    avg_positive = sum(positive_similarities) / max(1, len(positive_similarities))
+    avg_negative = sum(negative_similarities) / max(1, len(negative_similarities))
+    elapsed_seconds = time.perf_counter() - start
+    return {
+        "mode": "router_metrics",
+        "split": split,
+        "samples": len(reference_ids),
+        "labels": labels,
+        "router_checkpoint": str(router_path),
+        **router_metrics,
+        "router_loss": sum(losses) / max(1, len(losses)),
+        "avg_positive_similarity": avg_positive,
+        "avg_max_negative_similarity": avg_negative,
+        "avg_similarity_gap": avg_positive - avg_negative,
+        "inference_seconds": inference_seconds,
+        "inference_seconds_per_sample": inference_seconds / max(1, len(reference_ids)),
+        "total_audio_seconds": total_audio_seconds,
+        "realtime_factor": (
+            inference_seconds / total_audio_seconds
+            if total_audio_seconds > 0.0
+            else None
+        ),
+        "elapsed_seconds": elapsed_seconds,
+        "seconds_per_sample": elapsed_seconds / max(1, len(reference_ids)),
+        "records": records,
+    }
+
+
 def evaluate_hf_whisper(
     *,
     config: dict[str, Any],
@@ -1135,7 +1310,7 @@ def main() -> int:
             adapter_dir=args.adapter_dir,
         )
         filename = f"eval_adalora_{sanitize_name(str(args.language)).lower()}_{args.split}.json"
-    else:
+    elif args.mode == "router":
         payload = evaluate_router(
             config=config,
             split=str(args.split),
@@ -1145,6 +1320,16 @@ def main() -> int:
             router_checkpoint=args.router_checkpoint,
         )
         filename = f"eval_router_full_{args.split}.json"
+    else:
+        payload = evaluate_router_metrics(
+            config=config,
+            split=str(args.split),
+            max_samples=args.max_samples,
+            batch_size=args.batch_size,
+            device_name=args.device,
+            router_checkpoint=args.router_checkpoint,
+        )
+        filename = f"eval_router_metrics_{args.split}.json"
 
     output_path = write_eval_json(args.output_dir, filename, payload)
     print(f"eval_json={output_path}", flush=True)

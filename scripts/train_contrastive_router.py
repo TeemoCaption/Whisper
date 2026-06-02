@@ -317,6 +317,54 @@ def filter_wandb_scalars(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def run_test_evaluation(
+    *,
+    encoder,
+    router: ContrastiveAdapterRouter,
+    test_loader: DataLoader,
+    device: torch.device,
+    router_cfg: dict[str, Any],
+    labels: list[str],
+    output_dir: Path,
+    best_macro_f1: float,
+    wandb_run,
+    global_step: int,
+) -> dict[str, Any]:
+    test_metrics = evaluate(
+        encoder=encoder,
+        router=router,
+        loader=test_loader,
+        device=device,
+        cfg=router_cfg,
+    )
+    test_confusion_paths = save_confusion_matrix_artifacts(
+        confusion_matrix=test_metrics["confusion_matrix"],
+        labels=labels,
+        output_dir=output_dir,
+        name="test_final",
+    )
+    test_summary = {
+        "split": "test",
+        "best_dev_macro_f1": best_macro_f1,
+        **{f"test_{key}": value for key, value in test_metrics.items()},
+        "test_confusion_matrix_paths": test_confusion_paths,
+    }
+    (output_dir / "test_metrics.json").write_text(
+        json.dumps(test_summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(test_summary, ensure_ascii=False), flush=True)
+    if wandb_run is not None:
+        log_payload = filter_wandb_scalars(test_summary)
+        image_path = test_confusion_paths.get("image")
+        if image_path and str(image_path).endswith(".png"):
+            import wandb
+
+            log_payload["test_confusion_matrix"] = wandb.Image(image_path)
+        wandb_run.log(log_payload, step=global_step)
+    return test_summary
+
+
 def main() -> None:
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
@@ -501,6 +549,7 @@ def main() -> None:
     global_step = 0
     stale_epochs = 0
     full_epochs = max(1, int(epochs))
+    best_checkpoint_path = output_dir / "contrastive_router.pt"
     for epoch in range(1, full_epochs + 1):
         router.train()
         losses: list[float] = []
@@ -601,7 +650,6 @@ def main() -> None:
             )
             break
 
-    best_checkpoint_path = output_dir / "contrastive_router.pt"
     if best_checkpoint_path.exists():
         best_payload = torch.load(
             best_checkpoint_path,
@@ -609,38 +657,18 @@ def main() -> None:
             weights_only=False,
         )
         router.load_state_dict(best_payload["state_dict"])
-    test_metrics = evaluate(
+    run_test_evaluation(
         encoder=encoder,
         router=router,
-        loader=test_loader,
+        test_loader=test_loader,
         device=device,
-        cfg=router_cfg,
-    )
-    test_confusion_paths = save_confusion_matrix_artifacts(
-        confusion_matrix=test_metrics["confusion_matrix"],
+        router_cfg=router_cfg,
         labels=labels,
         output_dir=output_dir,
-        name="test_final",
+        best_macro_f1=best_macro_f1,
+        wandb_run=wandb_run,
+        global_step=global_step,
     )
-    test_summary = {
-        "split": "test",
-        "best_dev_macro_f1": best_macro_f1,
-        **{f"test_{key}": value for key, value in test_metrics.items()},
-        "test_confusion_matrix_paths": test_confusion_paths,
-    }
-    (output_dir / "test_metrics.json").write_text(
-        json.dumps(test_summary, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(test_summary, ensure_ascii=False), flush=True)
-    if wandb_run is not None:
-        log_payload = filter_wandb_scalars(test_summary)
-        image_path = test_confusion_paths.get("image")
-        if image_path and str(image_path).endswith(".png"):
-            import wandb
-
-            log_payload["test_confusion_matrix"] = wandb.Image(image_path)
-        wandb_run.log(log_payload, step=global_step)
 
     if wandb_run is not None:
         wandb_run.finish()
