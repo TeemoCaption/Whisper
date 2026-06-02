@@ -103,7 +103,7 @@ whisper_train:
     train_split: train
     eval_split: dev
     test_split: test
-    num_train_epochs: 10.0
+    num_train_epochs: 5.0
     learning_rate: 1.0e-4
     warmup_steps: 100
     weight_decay: 0.02
@@ -127,7 +127,7 @@ whisper_train:
     disable_tqdm: false
     early_stopping:
       enabled: true
-      patience: 3
+      patience: 1
       min_delta: 0.0
       metric: macro_f1
     report_to:

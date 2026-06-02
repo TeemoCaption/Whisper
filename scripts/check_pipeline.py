@@ -310,8 +310,8 @@ def validate_configs(failures: list[str]) -> None:
     router_cfg = lora.get("contrastive_router", {}) or {}
     router_h100_cfg = lora_h100.get("contrastive_router", {}) or {}
     require(
-        router_cfg.get("num_train_epochs") == 10.0,
-        "config.yaml 對比式路由應訓練 10 epochs。",
+        router_cfg.get("num_train_epochs") == 5.0,
+        "config.yaml 對比式路由應訓練 5 epochs。",
         failures,
     )
     require(
