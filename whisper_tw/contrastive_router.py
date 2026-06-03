@@ -18,6 +18,9 @@ class ContrastiveRouterSpec:
     hidden_ratio: float = 0.5
     dropout: float = 0.1
     temperature: float = 0.07
+    label_smoothing: float = 0.0
+    margin: float = 0.0
+    margin_loss_weight: float = 0.0
 
 
 class AttentionPooling(nn.Module):
@@ -105,7 +108,24 @@ class ContrastiveAdapterRouter(nn.Module):
         labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         outputs = self(encoder_hidden_states)
-        loss = F.cross_entropy(outputs["logits"], labels)
+        ce_loss = F.cross_entropy(
+            outputs["logits"],
+            labels,
+            label_smoothing=max(0.0, float(self.spec.label_smoothing)),
+        )
+        similarities = outputs["queries"] @ outputs["keys"].transpose(0, 1)
+        row_ids = torch.arange(labels.size(0), device=labels.device)
+        positive = similarities[row_ids, labels]
+        mask = torch.ones_like(similarities, dtype=torch.bool)
+        mask[row_ids, labels] = False
+        negative = similarities.masked_fill(~mask, float("-inf")).max(dim=-1).values
+
+        margin = max(0.0, float(self.spec.margin))
+        margin_loss = F.relu(margin - (positive - negative)).mean()
+        loss = ce_loss + max(0.0, float(self.spec.margin_loss_weight)) * margin_loss
+        outputs["ce_loss"] = ce_loss
+        outputs["margin_loss"] = margin_loss
+        outputs["similarity_gap"] = positive - negative
         return loss, outputs
 
     def checkpoint_payload(self) -> dict[str, Any]:
@@ -118,5 +138,8 @@ class ContrastiveAdapterRouter(nn.Module):
             "hidden_ratio": float(self.spec.hidden_ratio),
             "dropout": float(self.spec.dropout),
             "temperature": float(self.spec.temperature),
+            "label_smoothing": float(self.spec.label_smoothing),
+            "margin": float(self.spec.margin),
+            "margin_loss_weight": float(self.spec.margin_loss_weight),
             "state_dict": self.state_dict(),
         }

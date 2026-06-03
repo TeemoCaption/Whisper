@@ -165,9 +165,9 @@ LANGUAGE_TRAINING_DEFAULTS: dict[str, dict[str, Any]] = {
         "num_train_epochs": 10.0,
     },
     "nan-tw": {
-        "learning_rate": 8.0e-6,
-        "warmup_steps": 700,
-        "num_train_epochs": 12.0,
+        "learning_rate": 1.0e-5,
+        "warmup_steps": 500,
+        "num_train_epochs": 10.0,
     },
 }
 

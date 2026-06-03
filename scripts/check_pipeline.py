@@ -228,14 +228,14 @@ def validate_configs(failures: list[str]) -> None:
     apply_language_training_override(nan_cfg, "nan-tw")
     require(
         zh_cfg.get("training", {}).get("learning_rate")
-        != nan_cfg.get("training", {}).get("learning_rate"),
-        "--language zh-TW 與 --language nan-tw 應套用不同學習率。",
+        == nan_cfg.get("training", {}).get("learning_rate"),
+        "--language zh-TW 與 --language nan-tw 應套用相同學習率。",
         failures,
     )
     require(
         zh_cfg.get("training", {}).get("warmup_steps")
-        != nan_cfg.get("training", {}).get("warmup_steps"),
-        "--language zh-TW 與 --language nan-tw 應套用不同 warmup_steps。",
+        == nan_cfg.get("training", {}).get("warmup_steps"),
+        "--language zh-TW 與 --language nan-tw 應套用相同 warmup_steps。",
         failures,
     )
     require(
@@ -321,7 +321,7 @@ def validate_configs(failures: list[str]) -> None:
     )
     require(
         router_cfg.get("test_split") == "test",
-        "config.yaml 對比式路由應設定 test_split 以輸出最終混淆矩陣。",
+        "config.yaml 對比式路由應設定 test_split 供評估腳本重跑測試。",
         failures,
     )
     require(
@@ -330,18 +330,38 @@ def validate_configs(failures: list[str]) -> None:
         failures,
     )
     require(
-        router_cfg.get("attention_hidden_size") == 256,
+        router_cfg.get("attention_hidden_size") == 128,
         "config.yaml 對比式路由應設定 attention_hidden_size。",
         failures,
     )
     require(
-        router_cfg.get("embedding_size") == 256,
+        router_cfg.get("embedding_size") == 128,
         "config.yaml 對比式路由應設定 embedding_size。",
+        failures,
+    )
+    require(
+        router_cfg.get("hidden_ratio") == 0.25,
+        "config.yaml 對比式路由應降低 hidden_ratio 以抑制過擬合。",
         failures,
     )
     require(
         router_cfg.get("temperature") is not None,
         "config.yaml 對比式路由應設定 temperature。",
+        failures,
+    )
+    require(
+        router_cfg.get("label_smoothing") == 0.05,
+        "config.yaml 對比式路由應啟用標籤平滑。",
+        failures,
+    )
+    require(
+        router_cfg.get("margin") == 0.2,
+        "config.yaml 對比式路由應設定相似度邊界。",
+        failures,
+    )
+    require(
+        router_cfg.get("margin_loss_weight") == 0.1,
+        "config.yaml 對比式路由應設定邊界損失權重。",
         failures,
     )
     require(

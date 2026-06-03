@@ -624,6 +624,208 @@ def write_eval_json(output_dir: str | Path, filename: str, payload: dict[str, An
     return output_path
 
 
+def write_confusion_matrix_artifacts(
+    *,
+    output_dir: str | Path,
+    name: str,
+    labels: list[str],
+    confusion_matrix: list[list[int]],
+) -> dict[str, str]:
+    matrix_dir = Path(output_dir) / "confusion_matrices"
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+    json_path = matrix_dir / f"{name}.json"
+    image_path = matrix_dir / f"{name}.png"
+    payload = {
+        "name": name,
+        "labels": labels,
+        "confusion_matrix": confusion_matrix,
+    }
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        cell_size = 260
+        label_width = 120
+        title_height = 64
+        bottom_height = 168
+        colorbar_width = 28
+        colorbar_gap = 26
+        right_margin = 78
+        matrix_size = cell_size * len(labels)
+        matrix_left = label_width
+        matrix_top = title_height
+        width = matrix_left + matrix_size + colorbar_gap + colorbar_width + right_margin
+        height = matrix_top + matrix_size + bottom_height
+        image = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(image)
+
+        try:
+            font_title = ImageFont.truetype("arial.ttf", 28)
+            font_label = ImageFont.truetype("arial.ttf", 22)
+            font_tick = ImageFont.truetype("arial.ttf", 20)
+            font_value = ImageFont.truetype("arial.ttf", 22)
+        except Exception:
+            font_title = ImageFont.load_default()
+            font_label = ImageFont.load_default()
+            font_tick = ImageFont.load_default()
+            font_value = ImageFont.load_default()
+
+        def text_center(position: tuple[float, float], text: str, font, fill: str = "#111827") -> None:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            draw.text(
+                (position[0] - text_width / 2, position[1] - text_height / 2),
+                text,
+                font=font,
+                fill=fill,
+            )
+
+        max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 0
+        midpoint = max_value / 2 if max_value else 0
+        display_name = "test_final" if name == "router_metrics_test" else name
+        text_center((width / 2, 28), f"Contrastive Router Matrix - {display_name}", font_title)
+        text_center(
+            (matrix_left + matrix_size / 2, height - 28),
+            "Predicted adapter",
+            font_label,
+        )
+        y_axis = Image.new("RGBA", (42, 180), (255, 255, 255, 0))
+        y_draw = ImageDraw.Draw(y_axis)
+        y_draw.text((0, 0), "True label", font=font_label, fill="#111827")
+        y_axis = y_axis.rotate(90, expand=True)
+        image.paste(y_axis, (18, matrix_top + matrix_size // 2 - y_axis.height // 2), y_axis)
+
+        draw.rectangle(
+            (matrix_left, matrix_top, matrix_left + matrix_size, matrix_top + matrix_size),
+            outline="#111827",
+            width=2,
+        )
+        for col, label in enumerate(labels):
+            tick_x = matrix_left + col * cell_size + cell_size / 2
+            draw.line(
+                (tick_x, matrix_top + matrix_size, tick_x, matrix_top + matrix_size + 7),
+                fill="#111827",
+                width=2,
+            )
+            label_image = Image.new("RGBA", (120, 44), (255, 255, 255, 0))
+            label_draw = ImageDraw.Draw(label_image)
+            label_draw.text((0, 0), label, font=font_tick, fill="#111827")
+            label_image = label_image.rotate(32, expand=True)
+            image.paste(
+                label_image,
+                (int(tick_x - label_image.width / 2), matrix_top + matrix_size + 16),
+                label_image,
+            )
+        for row, label in enumerate(labels):
+            tick_y = matrix_top + row * cell_size + cell_size / 2
+            draw.line((matrix_left - 7, tick_y, matrix_left, tick_y), fill="#111827", width=2)
+            text_center(
+                (matrix_left - 58, tick_y),
+                label,
+                font_tick,
+            )
+        for row_index, row in enumerate(confusion_matrix):
+            for col_index, value in enumerate(row):
+                ratio = 0.0 if max_value == 0 else value / max_value
+                base = int(247 - 235 * ratio)
+                fill = (base, int(251 - 190 * ratio), int(255 - 120 * ratio))
+                x = matrix_left + col_index * cell_size
+                y = matrix_top + row_index * cell_size
+                draw.rectangle(
+                    (x, y, x + cell_size, y + cell_size),
+                    fill=fill,
+                )
+                text_color = "white" if value > midpoint else "#111827"
+                text_center((x + cell_size / 2, y + cell_size / 2), str(value), font_value, text_color)
+        draw.rectangle(
+            (matrix_left, matrix_top, matrix_left + matrix_size, matrix_top + matrix_size),
+            outline="#111827",
+            width=2,
+        )
+
+        colorbar_left = matrix_left + matrix_size + colorbar_gap
+        colorbar_top = matrix_top
+        colorbar_height = matrix_size
+        for offset in range(colorbar_height):
+            ratio = 1.0 - offset / max(1, colorbar_height - 1)
+            base = int(247 - 235 * ratio)
+            fill = (base, int(251 - 190 * ratio), int(255 - 120 * ratio))
+            draw.line(
+                (colorbar_left, colorbar_top + offset, colorbar_left + colorbar_width, colorbar_top + offset),
+                fill=fill,
+            )
+        draw.rectangle(
+            (colorbar_left, colorbar_top, colorbar_left + colorbar_width, colorbar_top + colorbar_height),
+            outline="#111827",
+            width=2,
+        )
+        tick_count = 6
+        tick_step = max(1, int(max_value / tick_count)) if max_value else 1
+        for tick_value in range(tick_step, max_value + 1, tick_step):
+            y = colorbar_top + colorbar_height - int((tick_value / max_value) * colorbar_height)
+            draw.line(
+                (colorbar_left + colorbar_width, y, colorbar_left + colorbar_width + 8, y),
+                fill="#111827",
+                width=2,
+            )
+            draw.text(
+                (colorbar_left + colorbar_width + 14, y - 10),
+                str(tick_value),
+                font=font_tick,
+                fill="#111827",
+            )
+        image.save(image_path)
+    except Exception:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(5.5, 4.8))
+        image = ax.imshow(confusion_matrix, cmap="Blues")
+        ax.set_title(f"Router Confusion Matrix - {name}")
+        ax.set_xlabel("Predicted language")
+        ax.set_ylabel("Reference language")
+        ax.set_xticks(range(len(labels)), labels=labels, rotation=30, ha="right")
+        ax.set_yticks(range(len(labels)), labels=labels)
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+
+        max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 0
+        midpoint = max_value / 2 if max_value else 0
+        for row_index, row in enumerate(confusion_matrix):
+            for col_index, value in enumerate(row):
+                color = "white" if value > midpoint else "black"
+                ax.text(
+                    col_index,
+                    row_index,
+                    str(value),
+                    ha="center",
+                    va="center",
+                    color=color,
+                )
+        fig.tight_layout()
+        fig.savefig(image_path, dpi=160)
+        plt.close(fig)
+    except Exception as exc:
+        image_path = matrix_dir / f"{name}.txt"
+        image_path.write_text(
+            f"無法輸出混淆矩陣圖片: {exc}\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+
+    return {
+        "json": str(json_path),
+        "image": str(image_path),
+    }
+
+
 def evaluate_single_adapter(
     *,
     config: dict[str, Any],
@@ -746,6 +948,9 @@ def load_router(router_path: Path, device: torch.device) -> ContrastiveAdapterRo
         hidden_ratio=float(payload.get("hidden_ratio", 0.5)),
         dropout=float(payload.get("dropout", 0.1)),
         temperature=float(payload.get("temperature", 0.07)),
+        label_smoothing=float(payload.get("label_smoothing", 0.0)),
+        margin=float(payload.get("margin", 0.0)),
+        margin_loss_weight=float(payload.get("margin_loss_weight", 0.0)),
     )
     router = ContrastiveAdapterRouter(spec).to(device)
     router.load_state_dict(payload["state_dict"])
@@ -1330,6 +1535,12 @@ def main() -> int:
             router_checkpoint=args.router_checkpoint,
         )
         filename = f"eval_router_metrics_{args.split}.json"
+        payload["confusion_matrix_paths"] = write_confusion_matrix_artifacts(
+            output_dir=args.output_dir,
+            name=f"router_metrics_{args.split}",
+            labels=[str(label) for label in payload["labels"]],
+            confusion_matrix=payload["confusion_matrix"],
+        )
 
     output_path = write_eval_json(args.output_dir, filename, payload)
     print(f"eval_json={output_path}", flush=True)

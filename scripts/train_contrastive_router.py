@@ -34,7 +34,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/config.yaml", help="訓練設定檔。")
     parser.add_argument("--max-train-samples", type=int, help="覆寫訓練樣本上限。")
     parser.add_argument("--max-eval-samples", type=int, help="覆寫驗證樣本上限。")
-    parser.add_argument("--max-test-samples", type=int, help="覆寫測試樣本上限。")
     parser.add_argument("--num-epochs", type=float, help="覆寫訓練週期數。")
     return parser.parse_args()
 
@@ -164,74 +163,6 @@ def compute_metrics(
     }
 
 
-def save_confusion_matrix_artifacts(
-    *,
-    confusion_matrix: list[list[int]],
-    labels: list[str],
-    output_dir: Path,
-    name: str,
-) -> dict[str, str]:
-    matrix_dir = output_dir / "confusion_matrices"
-    matrix_dir.mkdir(parents=True, exist_ok=True)
-    json_path = matrix_dir / f"{name}.json"
-    png_path = matrix_dir / f"{name}.png"
-    payload = {
-        "name": name,
-        "labels": labels,
-        "confusion_matrix": confusion_matrix,
-    }
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(figsize=(5.5, 4.8))
-        image = ax.imshow(confusion_matrix, cmap="Blues")
-        ax.set_title(f"Contrastive Router Matrix - {name}")
-        ax.set_xlabel("Predicted adapter")
-        ax.set_ylabel("True label")
-        ax.set_xticks(range(len(labels)), labels=labels, rotation=30, ha="right")
-        ax.set_yticks(range(len(labels)), labels=labels)
-        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-
-        max_value = max(max(row) for row in confusion_matrix) if confusion_matrix else 0
-        midpoint = max_value / 2 if max_value else 0
-        for row_index, row in enumerate(confusion_matrix):
-            for col_index, value in enumerate(row):
-                color = "white" if value > midpoint else "black"
-                ax.text(
-                    col_index,
-                    row_index,
-                    str(value),
-                    ha="center",
-                    va="center",
-                    color=color,
-                )
-        fig.tight_layout()
-        fig.savefig(png_path, dpi=160)
-        plt.close(fig)
-    except Exception as exc:
-        fallback_path = matrix_dir / f"{name}.txt"
-        fallback_path.write_text(
-            f"無法輸出混淆矩陣圖片: {exc}\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
-            + "\n",
-            encoding="utf-8",
-        )
-        png_path = fallback_path
-
-    return {
-        "json": str(json_path),
-        "image": str(png_path),
-    }
-
-
 def evaluate(
     *,
     encoder,
@@ -317,54 +248,6 @@ def filter_wandb_scalars(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_test_evaluation(
-    *,
-    encoder,
-    router: ContrastiveAdapterRouter,
-    test_loader: DataLoader,
-    device: torch.device,
-    router_cfg: dict[str, Any],
-    labels: list[str],
-    output_dir: Path,
-    best_macro_f1: float,
-    wandb_run,
-    global_step: int,
-) -> dict[str, Any]:
-    test_metrics = evaluate(
-        encoder=encoder,
-        router=router,
-        loader=test_loader,
-        device=device,
-        cfg=router_cfg,
-    )
-    test_confusion_paths = save_confusion_matrix_artifacts(
-        confusion_matrix=test_metrics["confusion_matrix"],
-        labels=labels,
-        output_dir=output_dir,
-        name="test_final",
-    )
-    test_summary = {
-        "split": "test",
-        "best_dev_macro_f1": best_macro_f1,
-        **{f"test_{key}": value for key, value in test_metrics.items()},
-        "test_confusion_matrix_paths": test_confusion_paths,
-    }
-    (output_dir / "test_metrics.json").write_text(
-        json.dumps(test_summary, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(test_summary, ensure_ascii=False), flush=True)
-    if wandb_run is not None:
-        log_payload = filter_wandb_scalars(test_summary)
-        image_path = test_confusion_paths.get("image")
-        if image_path and str(image_path).endswith(".png"):
-            import wandb
-
-            log_payload["test_confusion_matrix"] = wandb.Image(image_path)
-        wandb_run.log(log_payload, step=global_step)
-    return test_summary
-
-
 def main() -> None:
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
@@ -413,6 +296,9 @@ def main() -> None:
         hidden_ratio=float(router_cfg.get("hidden_ratio", 0.5)),
         dropout=float(router_cfg.get("dropout", 0.1)),
         temperature=float(router_cfg.get("temperature", 0.07)),
+        label_smoothing=float(router_cfg.get("label_smoothing", 0.0)),
+        margin=float(router_cfg.get("margin", 0.0)),
+        margin_loss_weight=float(router_cfg.get("margin_loss_weight", 0.0)),
     )
     router = ContrastiveAdapterRouter(spec).to(device)
 
@@ -425,11 +311,6 @@ def main() -> None:
         args.max_eval_samples
         if args.max_eval_samples is not None
         else router_cfg.get("max_eval_samples")
-    )
-    max_test_samples = (
-        args.max_test_samples
-        if args.max_test_samples is not None
-        else router_cfg.get("max_test_samples")
     )
     train_dataset = RouterDataset(
         data_cfg=data_cfg,
@@ -445,19 +326,10 @@ def main() -> None:
         labels=labels,
         max_samples=None if max_eval_samples is None else int(max_eval_samples),
     )
-    test_dataset = RouterDataset(
-        data_cfg=data_cfg,
-        split=str(router_cfg.get("test_split") or data_cfg.get("test_split", "test")),
-        processor=processor,
-        labels=labels,
-        max_samples=None if max_test_samples is None else int(max_test_samples),
-    )
     if len(train_dataset) == 0:
         raise ValueError("對比式路由訓練資料為空，請先檢查前處理後的 language_label。")
     if len(eval_dataset) == 0:
         raise ValueError("對比式路由驗證資料為空，請先檢查前處理後的 language_label。")
-    if len(test_dataset) == 0:
-        raise ValueError("對比式路由測試資料為空，請先檢查前處理後的 language_label。")
 
     collator = RouterCollator(processor)
     num_workers = int(router_cfg.get("dataloader_num_workers", 1))
@@ -482,13 +354,6 @@ def main() -> None:
         shuffle=False,
         **loader_kwargs,
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=int(router_cfg.get("per_device_eval_batch_size", 4)),
-        shuffle=False,
-        **loader_kwargs,
-    )
-
     optimizer = torch.optim.AdamW(
         router.parameters(),
         lr=float(router_cfg.get("learning_rate", 1.0e-4)),
@@ -522,7 +387,6 @@ def main() -> None:
                 "labels": labels,
                 "train_samples": len(train_dataset),
                 "eval_samples": len(eval_dataset),
-                "test_samples": len(test_dataset),
                 "output_dir": str(output_dir),
                 "device": str(device),
                 "router": {
@@ -532,6 +396,9 @@ def main() -> None:
                     "hidden_ratio": spec.hidden_ratio,
                     "dropout": spec.dropout,
                     "temperature": spec.temperature,
+                    "label_smoothing": spec.label_smoothing,
+                    "margin": spec.margin,
+                    "margin_loss_weight": spec.margin_loss_weight,
                 },
                 "early_stopping": {
                     "enabled": early_stopping_enabled,
@@ -649,26 +516,6 @@ def main() -> None:
                 flush=True,
             )
             break
-
-    if best_checkpoint_path.exists():
-        best_payload = torch.load(
-            best_checkpoint_path,
-            map_location=device,
-            weights_only=False,
-        )
-        router.load_state_dict(best_payload["state_dict"])
-    run_test_evaluation(
-        encoder=encoder,
-        router=router,
-        test_loader=test_loader,
-        device=device,
-        router_cfg=router_cfg,
-        labels=labels,
-        output_dir=output_dir,
-        best_macro_f1=best_macro_f1,
-        wandb_run=wandb_run,
-        global_step=global_step,
-    )
 
     if wandb_run is not None:
         wandb_run.finish()

@@ -119,11 +119,14 @@ whisper_train:
     weight_decay: 0.02
     max_grad_norm: 1.0
     pooling: attention
-    attention_hidden_size: 256
-    embedding_size: 256
-    hidden_ratio: 0.5
+    attention_hidden_size: 128
+    embedding_size: 128
+    hidden_ratio: 0.25
     dropout: 0.2
     temperature: 0.1
+    label_smoothing: 0.05
+    margin: 0.2
+    margin_loss_weight: 0.1
     per_device_train_batch_size: 4
     per_device_eval_batch_size: 4
     dataloader_num_workers: 1
