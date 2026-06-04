@@ -31,7 +31,8 @@
 安裝 PyTorch 與 CUDA 套件：
 
 - Windows：`conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y`
-- Linux：`conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y`
+- Linux：`pip uninstall -y torch torchaudio torchvision`
+- Linux：`pip install torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118`
 
 安裝音訊相依套件：
 
