@@ -100,12 +100,156 @@ python .\scripts\evaluate.py --config .\configs\config.yaml --mode router_metric
 python .\scripts\evaluate_baselines.py --config .\configs\config.yaml --split test
 ```
 
-H100 / Linux 指令：
+H100 / Linux 完整指令：
+
+以下流程假設已經把專案放到 Linux 伺服器上，並且目前位於專案根目錄。若還沒進入專案，請先切到實際路徑：
+
+```bash
+cd /path/to/Whisper-TW-codex
+```
+
+先確認系統能看到 H100 與 CUDA 驅動：
+
+```bash
+nvidia-smi
+```
+
+若 Linux 伺服器已經有 conda，直接建立環境：
+
+```bash
+conda create -n whisper-tw python=3.11 -y
+conda activate whisper-tw
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+conda install -c conda-forge ffmpeg libsndfile -y
+pip install -r requirements.txt
+```
+
+若 Linux 伺服器沒有 conda，可以先安裝 Miniforge。以下會安裝到家目錄底下的 `~/miniforge3`：
+
+```bash
+cd ~
+wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash Miniforge3-Linux-x86_64.sh -b -p "$HOME/miniforge3"
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda init bash
+source ~/.bashrc
+conda create -n whisper-tw python=3.11 -y
+conda activate whisper-tw
+```
+
+安裝完 Miniforge 後，回到專案並安裝訓練環境：
+
+```bash
+cd /path/to/Whisper-TW-codex
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+conda install -c conda-forge ffmpeg libsndfile -y
+pip install -r requirements.txt
+```
+
+確認 PyTorch 可以使用 GPU：
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.version.cuda); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+```
+
+第一次使用 wandb 前先登入：
+
+```bash
+wandb login
+```
+
+若要避免互動式登入，也可以用環境變數：
+
+```bash
+export WANDB_API_KEY="你的 wandb 金鑰"
+```
+
+下載 Common Voice 資料。Mozilla Data Collective 需要 API 金鑰，建議用環境變數：
+
+```bash
+export MDC_API_KEY="你的 Mozilla Data Collective API 金鑰"
+python scripts/download_cv.py --output-dir data
+```
+
+若金鑰放在文字檔，可改用：
+
+```bash
+python scripts/download_cv.py --output-dir data --api-key-file /path/to/mdc_api_key.txt
+```
+
+下載完成後，整理 `zh-TW` 與 `nan-tw` 欄位，產生雙語訓練 TSV：
+
+```bash
+python scripts/prepare_cv.py --data-root data --output-dir data/processed/common_voice
+```
+
+若在遠端伺服器寫記錄檔，不想顯示進度條，可以加上：
+
+```bash
+python scripts/prepare_cv.py --data-root data --output-dir data/processed/common_voice --no-progress
+```
+
+檢查前處理後的欄位與音檔路徑：
+
+```bash
+python scripts/check_cv.py --prepared-dir data/processed/common_voice --data-root data --check-audio --strict
+```
+
+執行整體流程靜態檢查：
+
+```bash
+python scripts/check_pipeline.py
+```
+
+若已經完成真實資料下載與前處理，可以加入真實資料檢查：
+
+```bash
+python scripts/check_pipeline.py --require-real-data --data-root data --prepared-dir data/processed/common_voice
+```
+
+訓練對比式鑰匙查詢路由，使用 H100 配置檔：
 
 ```bash
 python scripts/train_contrastive_router.py --config configs/config_h100.yaml
+```
+
+訓練語言專屬 AdaLoRA adapter。建議兩個語言分開執行，方便 wandb 與輸出資料夾追蹤：
+
+```bash
 python scripts/train.py --config configs/config_h100.yaml --language zh-TW
 python scripts/train.py --config configs/config_h100.yaml --language nan-tw
+```
+
+若要只評估單一語言 adapter：
+
+```bash
+python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language zh-TW --split test
+python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language nan-tw --split test
+```
+
+若要先快速測試評估流程，可以限制樣本數：
+
+```bash
+python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language zh-TW --split test --max-samples 20
+python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language nan-tw --split test --max-samples 20
+```
+
+等 `zh-TW`、`nan-tw` adapter 與對比式路由都完成後，執行完整路由評估：
+
+```bash
+python scripts/evaluate.py --config configs/config_h100.yaml --mode router --split test
+```
+
+若只要重跑對比式路由的分類指標與混淆矩陣，不載入 adapter：
+
+```bash
+python scripts/evaluate.py --config configs/config_h100.yaml --mode router_metrics --split test
+```
+
+若要比較目前 adapter 與 `configs/baselines.yaml` 中啟用的 Whisper 基線：
+
+```bash
+python scripts/evaluate_baselines.py --config configs/config_h100.yaml --split test
 ```
 
 整體流程靜態總檢查：

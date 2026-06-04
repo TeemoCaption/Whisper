@@ -584,12 +584,16 @@ def setup_wandb_run(
     except ImportError:
         print("已要求記錄到 wandb，但目前環境未安裝 wandb；略過線上紀錄。", flush=True)
         return None
-    return wandb.init(
+    run = wandb.init(
         project=str(training_cfg.get("wandb_project") or "whisper-tw"),
         name=str(training_cfg.get("run_name") or output_dir.name),
         config=run_config,
         dir=str(output_dir),
     )
+    run.define_metric("epoch")
+    run.define_metric("train/*", step_metric="epoch")
+    run.define_metric("eval/*", step_metric="epoch")
+    return run
 
 
 def save_model_artifacts(model, processor, final_dir: Path, peft_info: dict[str, Any]) -> None:
@@ -707,15 +711,16 @@ def train_one_epoch(
             )
 
         if global_step % logging_steps == 0:
+            epoch_progress = (epoch - 1) + (batch_index / max(1, len(train_loader)))
             metrics = {
+                "epoch": epoch_progress,
                 "train/loss": recent_loss / max(1, recent_count),
                 "train/learning_rate": scheduler.get_last_lr()[0],
-                "train/epoch": epoch,
-                "train/global_step": global_step,
+                "train/epoch": epoch_progress,
             }
             print(json.dumps({"stage": "train_step", **metrics}, ensure_ascii=False), flush=True)
             if wandb_run is not None:
-                wandb_run.log(metrics, step=global_step)
+                wandb_run.log(metrics)
             recent_loss = 0.0
             recent_count = 0
 
@@ -1094,9 +1099,7 @@ def main(
                     "train/loss_epoch": train_loss,
                     "eval/loss": eval_loss,
                     "eval/best_loss": best_metric,
-                    "train/global_step": global_step,
                 },
-                step=global_step,
             )
 
         if (
