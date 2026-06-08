@@ -111,6 +111,11 @@
 - Windows：`python .\scripts\ft_whisper.py --config .\configs\config.yaml --language zh-TW --model-name-or-path openai/whisper-small`
 - Linux：`python scripts/ft_whisper.py --config configs/config_h100.yaml --language zh-TW --model-name-or-path openai/whisper-small`
 
+微調全部 Whisper 基線模型：
+
+- Windows：`python .\scripts\run_baselines.py --config .\configs\config.yaml --redo-ft`
+- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --redo-ft`
+
 ## 5. 評估
 
 若目前只完成其中一個語言 adapter，可以先單獨評估該語言。以下指令只會讀取對應 `language_label` 的測試樣本，並載入對應 adapter。
@@ -144,11 +149,6 @@
 
 - Windows：`python .\scripts\run_baselines.py --config .\configs\config.yaml`
 - Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml`
-
-若要不刪除既有資料夾、直接重跑所有 Whisper 基線微調：
-
-- Windows：`python .\scripts\run_baselines.py --config .\configs\config.yaml --redo-ft`
-- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --redo-ft`
 
 ## 6. 檢查
 
