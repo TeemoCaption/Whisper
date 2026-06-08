@@ -56,20 +56,11 @@
 
 ## 2. 下載與前處理資料
 
-訓練資料來自 Mozilla Data Collective 的 Common Voice，下載需要 API 金鑰。建議用環境變數設定：
-
-- Windows：`$env:MDC_API_KEY="你的 Mozilla Data Collective API 金鑰"`
-- Linux：`export MDC_API_KEY="你的 Mozilla Data Collective API 金鑰"`
-
+訓練資料來自 Mozilla Data Collective 的 Common Voice，下載需要 API 金鑰。
 下載所有已知 Common Voice 資料集。若資料夾已存在，腳本會自動略過並繼續下一份：
 
 - Windows：`python .\scripts\download_cv.py --output-dir .\data`
 - Linux：`python scripts/download_cv.py --output-dir data`
-
-若金鑰放在本機文字檔，可改用：
-
-- Windows：`python .\scripts\download_cv.py --output-dir .\data --api-key-file C:\tmp\mdc_api_key.txt`
-- Linux：`python scripts/download_cv.py --output-dir data --api-key-file /path/to/mdc_api_key.txt`
 
 整理 `zh-TW` 與 `nan-tw` 欄位，產生雙語訓練 TSV。`nan-tw` 的括號台羅或白話字會移到輔助欄位，主目標保留台語文字：
 
@@ -100,7 +91,7 @@
 
 ## 4. 訓練
 
-訓練對比式鑰匙查詢路由。路由器會使用凍結的 Whisper encoder 表示產生查詢向量，並和 `zh-TW`、`nan-tw` adapter 的鑰匙向量比對：
+訓練對比式查詢路由器。路由器會使用凍結的 Whisper encoder 表示產生查詢向量，並和 `zh-TW`、`nan-tw` 語言原型向量比對：
 
 - Windows：`python .\scripts\train_contrastive_router.py --config .\configs\config.yaml`
 - Linux：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml`
@@ -114,6 +105,11 @@
 
 - Windows：`python .\scripts\train.py --config .\configs\config.yaml --language nan-tw`
 - Linux：`python scripts/train.py --config configs/config_h100.yaml --language nan-tw`
+
+單獨微調一個 Whisper 基線模型：
+
+- Windows：`python .\scripts\ft_whisper.py --config .\configs\config.yaml --language zh-TW --model-name-or-path openai/whisper-small`
+- Linux：`python scripts/ft_whisper.py --config configs/config_h100.yaml --language zh-TW --model-name-or-path openai/whisper-small`
 
 ## 5. 評估
 
@@ -129,16 +125,6 @@
 - Windows：`python .\scripts\evaluate.py --config .\configs\config.yaml --mode single --language nan-tw --split test`
 - Linux：`python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language nan-tw --split test`
 
-快速檢查 `zh-TW` adapter，可先限制樣本數：
-
-- Windows：`python .\scripts\evaluate.py --config .\configs\config.yaml --mode single --language zh-TW --split test --max-samples 20`
-- Linux：`python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language zh-TW --split test --max-samples 20`
-
-快速檢查 `nan-tw` adapter，可先限制樣本數：
-
-- Windows：`python .\scripts\evaluate.py --config .\configs\config.yaml --mode single --language nan-tw --split test --max-samples 20`
-- Linux：`python scripts/evaluate.py --config configs/config_h100.yaml --mode single --language nan-tw --split test --max-samples 20`
-
 等 `zh-TW`、`nan-tw` adapter 與對比式路由都完成後，可以執行完整路由評估。這會同時計算路由指標、路由選擇 adapter 的 CER、正確 adapter 的 CER 與錯誤 adapter 的 CER：
 
 - Windows：`python .\scripts\evaluate.py --config .\configs\config.yaml --mode router --split test`
@@ -153,6 +139,16 @@
 
 - Windows：`python .\scripts\evaluate_baselines.py --config .\configs\config.yaml --split test`
 - Linux：`python scripts/evaluate_baselines.py --config configs/config_h100.yaml --split test`
+
+若要自動補齊缺少的 Whisper 基線微調權重，並接著輸出基線比較表：
+
+- Windows：`python .\scripts\run_baselines.py --config .\configs\config.yaml`
+- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml`
+
+若要不刪除既有資料夾、直接重跑所有 Whisper 基線微調：
+
+- Windows：`python .\scripts\run_baselines.py --config .\configs\config.yaml --redo-ft`
+- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --redo-ft`
 
 ## 6. 檢查
 

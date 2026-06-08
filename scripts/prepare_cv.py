@@ -50,6 +50,9 @@ UNBALANCED_PAREN_RE = re.compile(r"\([^()]*$")
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 LATIN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ\u0300-\u036f]")
 WHITESPACE_RE = re.compile(r"\s+")
+KANA_RE = re.compile(r"[\u3040-\u30ff]")
+BOPOMOFO_RE = re.compile(r"[\u3100-\u312f\u31a0-\u31bf]")
+IDEOGRAPHIC_DESCRIPTION_RE = re.compile(r"[\u2ff0-\u2fff]")
 ROMANIZATION_SEPARATORS = (",", "，")
 
 
@@ -123,6 +126,28 @@ def has_cjk(text: str) -> bool:
 
 def contains_latin(text: str) -> bool:
     return bool(LATIN_RE.search(normalize_text(text)))
+
+
+def contains_latin_letter(text: str) -> bool:
+    return any(
+        unicodedata.category(ch).startswith("L")
+        and "LATIN" in unicodedata.name(ch, "")
+        for ch in text
+    )
+
+
+def nan_tw_target_filter_reason(text: str) -> str:
+    if contains_latin_letter(text):
+        return "mixed_latin"
+    if KANA_RE.search(text):
+        return "mixed_kana"
+    if BOPOMOFO_RE.search(text):
+        return "mixed_bopomofo"
+    if IDEOGRAPHIC_DESCRIPTION_RE.search(text):
+        return "ideographic_description"
+    if re.search(r"\s", text):
+        return "contains_space"
+    return ""
 
 
 def looks_like_romanization(text: str) -> bool:
@@ -248,6 +273,7 @@ def prepare_row(
         )
         if target_script == "romanized_only" and not keep_romanized_only:
             filter_reason = "romanized_only"
+        filter_reason = filter_reason or nan_tw_target_filter_reason(target_text)
     elif locale == "zh-TW":
         target_text, target_script = prepare_zh_tw_sentence(normalized_sentence)
         romanization_text = ""

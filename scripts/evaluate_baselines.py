@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-samples", type=int, help="只評估前 N 筆樣本。")
     parser.add_argument("--batch-size", type=int, help="覆蓋評估批次大小。")
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        help="覆蓋評估 DataLoader worker 數；共享記憶體不足時建議設為 0。",
+    )
     parser.add_argument("--device", help="覆蓋所有模型的裝置。")
     parser.add_argument("--output-dir", default="artifacts/eval", help="評估輸出資料夾。")
     parser.add_argument(
@@ -109,12 +114,40 @@ def build_error_payload(*, split: str, error: Exception) -> dict[str, Any]:
     }
 
 
+def attach_baseline_metadata(payload: dict[str, Any], baseline_cfg: dict[str, Any]) -> dict[str, Any]:
+    payload["baseline_name"] = baseline_cfg.get("name")
+    payload["display_name"] = baseline_cfg.get("display_name")
+    payload["training_method"] = baseline_cfg.get("training_method")
+    payload["test_data"] = baseline_cfg.get("test_data")
+    if baseline_cfg.get("trainable_parameters") is not None:
+        payload["trainable_parameters"] = int(baseline_cfg["trainable_parameters"])
+    summary_path = baseline_cfg.get("summary_path")
+    if summary_path and Path(summary_path).exists():
+        summary = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+        for key in (
+            "trainable_parameters",
+            "total_parameters",
+            "best_epoch",
+            "best_metric",
+        ):
+            if key in summary and key not in payload:
+                payload[key] = summary[key]
+    return payload
+
+
 def run_entry(
     *,
     baseline_cfg: dict[str, Any],
     config: dict[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    if args.dataloader_num_workers is not None:
+        train_cfg = config.setdefault("whisper_train", {})
+        training_cfg = train_cfg.setdefault("training", {})
+        training_cfg["dataloader_num_workers"] = max(0, int(args.dataloader_num_workers))
+        if int(args.dataloader_num_workers) <= 0:
+            training_cfg["dataloader_persistent_workers"] = False
+            training_cfg["dataloader_prefetch_factor"] = None
     baseline_type = str(baseline_cfg["type"])
     if baseline_type == "adalora_adapter":
         language = str(baseline_cfg.get("language") or args.language)
@@ -191,6 +224,7 @@ def main() -> int:
                 f"eval_error name={name} type={type(exc).__name__}: {exc}",
                 flush=True,
             )
+        payload = attach_baseline_metadata(payload, baseline_cfg)
         output_path = write_eval_json(
             args.output_dir,
             f"eval_{sanitize_name(name)}.json",

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ print("PyTorch 載入完成。", flush=True)
 
 from whisper_tw.config import load_config, resolve_common_voice_split_source
 from whisper_tw.data import load_audio_waveform, read_common_voice_split
+from whisper_tw.metrics import character_error_rate
 from whisper_tw.text_norm import build_text_normalizer
 
 try:
@@ -165,9 +167,9 @@ LANGUAGE_TRAINING_DEFAULTS: dict[str, dict[str, Any]] = {
         "num_train_epochs": 10.0,
     },
     "nan-tw": {
-        "learning_rate": 1.0e-5,
+        "learning_rate": 1.5e-5,
         "warmup_steps": 500,
-        "num_train_epochs": 10.0,
+        "num_train_epochs": 40.0,
     },
 }
 
@@ -199,7 +201,15 @@ def apply_language_training_override(
     data_cfg["language_filter"] = selected_language
 
     training_cfg = train_cfg.setdefault("training", {})
-    for key, value in LANGUAGE_TRAINING_DEFAULTS.get(selected_language, {}).items():
+    language_training_defaults = dict(
+        LANGUAGE_TRAINING_DEFAULTS.get(selected_language, {})
+    )
+    configured_language_defaults = train_cfg.get("language_training_defaults") or {}
+    if isinstance(configured_language_defaults, dict):
+        language_training_defaults.update(
+            dict(configured_language_defaults.get(selected_language) or {})
+        )
+    for key, value in language_training_defaults.items():
         training_cfg[key] = value
     base_output_dir = Path(
         str(training_cfg.get("output_dir") or "artifacts/models/whisper_medium_adalora")
@@ -259,8 +269,10 @@ class WhisperTrainingDataset(torch.utils.data.Dataset):
         if not data_cfg:
             data_cfg = train_data_cfg
         split_source = resolve_split_source(base_config, train_data_cfg, split)
+        self.data_root = data_cfg.get("root", "data")
+        self.split_source = str(split_source)
         self.samples = read_common_voice_split(
-            data_cfg.get("root", "data"),
+            self.data_root,
             split_source,
             language_filter=language_filter,
         )
@@ -513,6 +525,79 @@ def build_grad_scaler(device: torch.device, fp16: bool):
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+def build_generation_kwargs(training_cfg: dict[str, Any]) -> dict[str, Any]:
+    kwargs = {
+        "max_length": int(training_cfg.get("generation_max_length", 96)),
+        "num_beams": int(training_cfg.get("generation_num_beams", 1)),
+    }
+    optional_int_keys = {
+        "no_repeat_ngram_size": "generation_no_repeat_ngram_size",
+    }
+    optional_float_keys = {
+        "repetition_penalty": "generation_repetition_penalty",
+        "length_penalty": "generation_length_penalty",
+    }
+    for generate_key, config_key in optional_int_keys.items():
+        if training_cfg.get(config_key) is not None:
+            kwargs[generate_key] = int(training_cfg[config_key])
+    for generate_key, config_key in optional_float_keys.items():
+        if training_cfg.get(config_key) is not None:
+            kwargs[generate_key] = float(training_cfg[config_key])
+    return kwargs
+
+
+def configure_spec_augment(model, training_cfg: dict[str, Any]) -> None:
+    spec_cfg = training_cfg.get("spec_augment") or {}
+    if not isinstance(spec_cfg, dict) or not spec_cfg:
+        return
+    enabled = bool(spec_cfg.get("enabled", False))
+    values = {
+        "apply_spec_augment": enabled,
+        "mask_time_prob": float(spec_cfg.get("mask_time_prob", 0.0)),
+        "mask_time_length": int(spec_cfg.get("mask_time_length", 10)),
+        "mask_feature_prob": float(spec_cfg.get("mask_feature_prob", 0.0)),
+        "mask_feature_length": int(spec_cfg.get("mask_feature_length", 10)),
+    }
+    candidates = [model, getattr(model, "base_model", None)]
+    if hasattr(model, "get_base_model"):
+        candidates.append(model.get_base_model())
+    for candidate in candidates:
+        config = getattr(candidate, "config", None) if candidate is not None else None
+        if config is None:
+            continue
+        for key, value in values.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+
+
+def configure_whisper_generation(model, *, language: str, task: str) -> None:
+    candidates = [model, getattr(model, "base_model", None)]
+    if hasattr(model, "get_base_model"):
+        candidates.append(model.get_base_model())
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        config = getattr(candidate, "config", None)
+        generation_config = getattr(candidate, "generation_config", None)
+        if generation_config is not None:
+            generation_config.language = language
+            generation_config.task = task
+            generation_config.forced_decoder_ids = None
+            generation_config.suppress_tokens = []
+        if config is None:
+            continue
+
+        for attr in ("max_length", "suppress_tokens", "begin_suppress_tokens"):
+            if generation_config is not None and hasattr(config, attr):
+                value = getattr(config, attr)
+                if value is not None:
+                    setattr(generation_config, attr, value)
+            if attr in getattr(config, "__dict__", {}):
+                delattr(config, attr)
+        config.forced_decoder_ids = None
+
+
 def maybe_tqdm(iterable, *, total: int, desc: str, disabled: bool):
     if disabled:
         return iterable
@@ -543,6 +628,7 @@ def build_lr_scheduler(
     scheduler_type = str(training_cfg.get("lr_scheduler_type", "linear")).lower()
     warmup_steps = max(0, int(training_cfg.get("warmup_steps", 0)))
     total_update_steps = max(1, int(total_update_steps))
+    min_lr_ratio = max(0.0, min(1.0, float(training_cfg.get("min_lr_ratio", 0.0))))
 
     def linear_lambda(current_step: int) -> float:
         if warmup_steps > 0 and current_step < warmup_steps:
@@ -551,6 +637,11 @@ def build_lr_scheduler(
         decay_steps = max(1, total_update_steps - warmup_steps)
         return max(0.0, float(remaining_steps) / float(decay_steps))
 
+    def linear_floor_lambda(current_step: int) -> float:
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return max(min_lr_ratio, linear_lambda(current_step))
+
     def constant_lambda(current_step: int) -> float:
         if warmup_steps > 0 and current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
@@ -558,6 +649,8 @@ def build_lr_scheduler(
 
     if scheduler_type == "constant":
         return torch.optim.lr_scheduler.LambdaLR(optimizer, constant_lambda)
+    if scheduler_type in {"linear_floor", "linear_with_floor"}:
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, linear_floor_lambda)
     if scheduler_type != "linear":
         print(
             f"未支援的學習率排程 {scheduler_type!r}，改用線性排程。",
@@ -591,8 +684,7 @@ def setup_wandb_run(
         dir=str(output_dir),
     )
     run.define_metric("epoch")
-    run.define_metric("train/*", step_metric="epoch")
-    run.define_metric("eval/*", step_metric="epoch")
+    run.define_metric("*", step_metric="epoch")
     return run
 
 
@@ -714,13 +806,10 @@ def train_one_epoch(
             epoch_progress = (epoch - 1) + (batch_index / max(1, len(train_loader)))
             metrics = {
                 "epoch": epoch_progress,
-                "train/loss": recent_loss / max(1, recent_count),
-                "train/learning_rate": scheduler.get_last_lr()[0],
-                "train/epoch": epoch_progress,
+                "train_loss": recent_loss / max(1, recent_count),
+                "train_learning_rate": scheduler.get_last_lr()[0],
             }
             print(json.dumps({"stage": "train_step", **metrics}, ensure_ascii=False), flush=True)
-            if wandb_run is not None:
-                wandb_run.log(metrics)
             recent_loss = 0.0
             recent_count = 0
 
@@ -766,6 +855,100 @@ def evaluate_loss(
         if empty_cache_steps > 0 and batch_index % empty_cache_steps == 0 and device.type == "cuda":
             torch.cuda.empty_cache()
     return total_loss / max(1, total_items)
+
+
+@torch.no_grad()
+def evaluate_generation_cer(
+    *,
+    model,
+    eval_dataset: WhisperTrainingDataset,
+    processor,
+    device: torch.device,
+    training_cfg: dict[str, Any],
+    epoch: int,
+) -> dict[str, Any]:
+    model.eval()
+    max_samples = int(training_cfg.get("eval_cer_max_samples", 0) or 0)
+    samples = eval_dataset.samples if max_samples <= 0 else eval_dataset.samples[:max_samples]
+    if not samples:
+        return {"eval_cer": 0.0, "eval_cer_samples": 0, "eval_cer_seconds": 0.0}
+
+    batch_size = max(
+        1,
+        int(
+            training_cfg.get(
+                "eval_cer_batch_size",
+                training_cfg.get("per_device_eval_batch_size", 1),
+            )
+        ),
+    )
+    use_fp16 = bool(training_cfg.get("fp16", False))
+    use_bf16 = bool(training_cfg.get("bf16", False)) and not use_fp16
+    disable_tqdm = bool(training_cfg.get("disable_tqdm", False))
+    generation_kwargs = build_generation_kwargs(training_cfg)
+    references: list[str] = []
+    predictions: list[str] = []
+    start = time.perf_counter()
+
+    progress = maybe_tqdm(
+        range(0, len(samples), batch_size),
+        total=math.ceil(len(samples) / batch_size),
+        desc=f"epoch {epoch} eval CER",
+        disabled=disable_tqdm,
+    )
+    for start_index in progress:
+        batch_samples = samples[start_index : start_index + batch_size]
+        waveforms = []
+        batch_references = []
+        for sample in batch_samples:
+            waveform = load_audio_waveform(sample.audio_path, eval_dataset.sample_rate)
+            waveform = waveform[: eval_dataset.max_audio_samples]
+            waveforms.append(waveform.numpy())
+            reference = sample.text
+            if eval_dataset.normalizer.enabled:
+                reference = eval_dataset.normalizer(reference)
+            batch_references.append(reference)
+
+        inputs = processor.feature_extractor(
+            waveforms,
+            sampling_rate=eval_dataset.sample_rate,
+            return_tensors="pt",
+            padding="max_length",
+            return_attention_mask=True,
+        )
+        input_features = inputs["input_features"].to(
+            device=device,
+            dtype=getattr(model, "dtype", inputs["input_features"].dtype),
+        )
+        attention_mask = (
+            inputs["attention_mask"].to(device)
+            if inputs.get("attention_mask") is not None
+            else None
+        )
+        with autocast_context(device, fp16=use_fp16, bf16=use_bf16):
+            generate_inputs = {"input_features": input_features, **generation_kwargs}
+            if attention_mask is not None:
+                generate_inputs["attention_mask"] = attention_mask
+            generated_ids = model.generate(**generate_inputs)
+
+        decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)
+        if eval_dataset.normalizer.enabled:
+            decoded = [eval_dataset.normalizer(text) for text in decoded]
+        references.extend(batch_references)
+        predictions.extend(decoded)
+        if hasattr(progress, "set_postfix"):
+            progress.set_postfix(
+                {
+                    "cer": f"{character_error_rate(predictions, references):.4f}",
+                    "samples": len(references),
+                }
+            )
+
+    return {
+        "eval_cer": character_error_rate(predictions, references),
+        "eval_cer_samples": len(references),
+        "eval_cer_seconds": time.perf_counter() - start,
+    }
 
 
 def main(
@@ -846,12 +1029,8 @@ def main(
     print(f"載入 Whisper 模型: {model_name_or_path}", flush=True)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name_or_path)
     print("Whisper 模型載入完成。", flush=True)
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-    model.generation_config.language = language
-    model.generation_config.task = task
-    model.generation_config.forced_decoder_ids = None
-    model.generation_config.suppress_tokens = []
+    configure_whisper_generation(model, language=language, task=task)
+    configure_spec_augment(model, training_cfg)
 
     peft_info: dict[str, Any] = {"enabled": False, **count_parameters(model)}
     if is_peft_enabled(peft_cfg):
@@ -913,7 +1092,11 @@ def main(
     maybe_warmup_first_batch(train_dataset, eval_dataset, training_cfg)
 
     configure_wandb_environment(training_cfg, output_dir)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = str(training_cfg.get("device") or "auto")
+    if requested_device and requested_device != "auto":
+        device = torch.device(requested_device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor)
     train_loader = torch.utils.data.DataLoader(
@@ -951,15 +1134,20 @@ def main(
     use_bf16 = bool(training_cfg.get("bf16", False)) and not use_fp16
     scaler = build_grad_scaler(device, use_fp16)
     metric_for_best_model = str(training_cfg.get("metric_for_best_model", "eval_loss"))
-    if metric_for_best_model != "eval_loss":
+    supported_best_metrics = {"eval_loss", "eval_cer"}
+    if metric_for_best_model not in supported_best_metrics:
         print(
-            f"目前手寫訓練迴圈以 eval_loss 選最佳模型，忽略設定中的 {metric_for_best_model!r}。",
+            f"目前手寫訓練迴圈不支援 {metric_for_best_model!r}，改用 eval_loss。",
             flush=True,
         )
         metric_for_best_model = "eval_loss"
+    eval_cer_enabled = bool(training_cfg.get("eval_cer_enabled", False)) or (
+        metric_for_best_model == "eval_cer"
+    )
     greater_is_better = bool(training_cfg.get("greater_is_better", False))
     early_stopping_enabled = bool(early_stopping_cfg.get("enabled", True))
     early_stopping_patience = int(early_stopping_cfg.get("patience", 3))
+    early_stopping_min_epochs = max(1, int(early_stopping_cfg.get("min_epochs", 1)))
     early_stopping_threshold = float(early_stopping_cfg.get("threshold", 0.0))
     final_dir = output_dir / "final"
 
@@ -971,6 +1159,10 @@ def main(
                 "model_name_or_path": model_name_or_path,
                 "train_split": train_split,
                 "eval_split": eval_split,
+                "train_split_source": train_dataset.split_source,
+                "eval_split_source": eval_dataset.split_source,
+                "train_data_root": str(train_dataset.data_root),
+                "eval_data_root": str(eval_dataset.data_root),
                 "language_filter": language_filter,
                 "selected_adapter": selected_adapter,
                 "output_dir": str(output_dir),
@@ -987,7 +1179,21 @@ def main(
                 "training_hyperparameters": {
                     "num_train_epochs": total_epochs,
                     "learning_rate": float(training_cfg.get("learning_rate", 1.0e-5)),
+                    "lr_scheduler_type": str(
+                        training_cfg.get("lr_scheduler_type", "linear")
+                    ),
+                    "min_lr_ratio": float(training_cfg.get("min_lr_ratio", 0.0)),
                     "warmup_steps": int(training_cfg.get("warmup_steps", 0)),
+                    "generation_max_length": int(
+                        training_cfg.get("generation_max_length", 96)
+                    ),
+                    "generation_no_repeat_ngram_size": int(
+                        training_cfg.get("generation_no_repeat_ngram_size", 0) or 0
+                    ),
+                    "generation_repetition_penalty": float(
+                        training_cfg.get("generation_repetition_penalty", 1.0)
+                    ),
+                    "spec_augment": training_cfg.get("spec_augment") or {},
                     "gradient_accumulation_steps": gradient_accumulation_steps,
                     "per_device_train_batch_size": int(
                         training_cfg.get("per_device_train_batch_size", 1)
@@ -997,6 +1203,16 @@ def main(
                     ),
                 },
                 "metric_for_best_model": metric_for_best_model,
+                "eval_cer": {
+                    "enabled": eval_cer_enabled,
+                    "max_samples": int(training_cfg.get("eval_cer_max_samples", 0) or 0),
+                    "batch_size": int(
+                        training_cfg.get(
+                            "eval_cer_batch_size",
+                            training_cfg.get("per_device_eval_batch_size", 1),
+                        )
+                    ),
+                },
                 "load_best_model_at_end": bool(
                     training_cfg.get("load_best_model_at_end", True)
                 ),
@@ -1013,6 +1229,7 @@ def main(
                 "early_stopping": {
                     "enabled": bool(early_stopping_cfg.get("enabled", True)),
                     "patience": int(early_stopping_cfg.get("patience", 3)),
+                    "min_epochs": early_stopping_min_epochs,
                     "threshold": float(early_stopping_cfg.get("threshold", 0.0)),
                 },
             },
@@ -1064,14 +1281,29 @@ def main(
             epoch=epoch,
             training_cfg=training_cfg,
         )
+        eval_cer_metrics: dict[str, Any] = {}
+        if eval_cer_enabled:
+            eval_cer_metrics = evaluate_generation_cer(
+                model=model,
+                eval_dataset=eval_dataset,
+                processor=processor,
+                device=device,
+                training_cfg=training_cfg,
+                epoch=epoch,
+            )
+        current_metric = (
+            float(eval_cer_metrics["eval_cer"])
+            if metric_for_best_model == "eval_cer"
+            else eval_loss
+        )
         improved = is_better_metric(
-            eval_loss,
+            current_metric,
             best_metric,
             greater_is_better=greater_is_better,
             threshold=early_stopping_threshold,
         )
         if improved:
-            best_metric = eval_loss
+            best_metric = current_metric
             best_epoch = epoch
             best_global_step = global_step
             stale_epochs = 0
@@ -1084,7 +1316,13 @@ def main(
             "global_step": global_step,
             "train_loss": train_loss,
             "eval_loss": eval_loss,
-            "best_eval_loss": best_metric,
+            **eval_cer_metrics,
+            "best_metric_name": metric_for_best_model,
+            "best_metric": best_metric,
+            "best_eval_loss": best_metric
+            if metric_for_best_model == "eval_loss"
+            else None,
+            "best_eval_cer": best_metric if metric_for_best_model == "eval_cer" else None,
             "best_epoch": best_epoch,
             "stale_epochs": stale_epochs,
             "learning_rate": scheduler.get_last_lr()[0],
@@ -1096,14 +1334,22 @@ def main(
             wandb_run.log(
                 {
                     "epoch": epoch,
-                    "train/loss_epoch": train_loss,
-                    "eval/loss": eval_loss,
-                    "eval/best_loss": best_metric,
+                    "train_loss": train_loss,
+                    "eval_loss": eval_loss,
+                    **eval_cer_metrics,
+                    "eval_best_metric": best_metric,
+                    "eval_best_loss": best_metric
+                    if metric_for_best_model == "eval_loss"
+                    else None,
+                    "eval_best_cer": best_metric
+                    if metric_for_best_model == "eval_cer"
+                    else None,
                 },
             )
 
         if (
             early_stopping_enabled
+            and epoch >= early_stopping_min_epochs
             and stale_epochs >= early_stopping_patience
         ):
             print(
@@ -1115,6 +1361,7 @@ def main(
                         "best_metric": best_metric,
                         "stale_epochs": stale_epochs,
                         "patience": early_stopping_patience,
+                        "min_epochs": early_stopping_min_epochs,
                     },
                     ensure_ascii=False,
                 ),
@@ -1132,6 +1379,15 @@ def main(
         "best_global_step": best_global_step,
         "metric_for_best_model": metric_for_best_model,
         "final_dir": str(final_dir),
+        "model_name_or_path": model_name_or_path,
+        "language_filter": language_filter,
+        "trainable_parameters": trainability["trainable_parameters"],
+        "total_parameters": trainability["total_parameters"],
+        "freeze_encoder": freeze_encoder,
+        "train_decoder": train_decoder,
+        "unfreeze_encoder_last_n_layers": trainability[
+            "unfreeze_encoder_last_n_layers"
+        ],
         "peft": peft_info,
         "history": history,
     }

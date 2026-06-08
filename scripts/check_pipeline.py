@@ -228,14 +228,14 @@ def validate_configs(failures: list[str]) -> None:
     apply_language_training_override(nan_cfg, "nan-tw")
     require(
         zh_cfg.get("training", {}).get("learning_rate")
-        == nan_cfg.get("training", {}).get("learning_rate"),
-        "--language zh-TW 與 --language nan-tw 應套用相同學習率。",
+        < nan_cfg.get("training", {}).get("learning_rate"),
+        "--language nan-tw 應套用較高學習率以加快前期收斂。",
         failures,
     )
     require(
         zh_cfg.get("training", {}).get("warmup_steps")
-        == nan_cfg.get("training", {}).get("warmup_steps"),
-        "--language zh-TW 與 --language nan-tw 應套用相同 warmup_steps。",
+        > nan_cfg.get("training", {}).get("warmup_steps"),
+        "--language nan-tw 應套用較短 warmup_steps 以加快前期收斂。",
         failures,
     )
     require(
@@ -369,7 +369,16 @@ def validate_configs(failures: list[str]) -> None:
         "8GB 與 H100 對比式路由語言標籤不一致。",
         failures,
     )
-    for key in ("model", "peft", "data"):
+    model_8gb = dict(lora.get("model", {}) or {})
+    model_h100 = dict(lora_h100.get("model", {}) or {})
+    model_8gb.pop("gradient_checkpointing", None)
+    model_h100.pop("gradient_checkpointing", None)
+    require(
+        model_8gb == model_h100,
+        "8GB 與 H100 低秩訓練的 model 設定不一致。",
+        failures,
+    )
+    for key in ("peft", "data"):
         require(
             lora.get(key) == lora_h100.get(key),
             f"8GB 與 H100 低秩訓練的 {key} 設定不一致。",

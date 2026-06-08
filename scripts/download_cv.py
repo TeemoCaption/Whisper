@@ -727,13 +727,12 @@ def append_duration_log(log_path: Path, dataset_name: str, summary: dict) -> Non
 
 def download_dataset(
     dataset_spec: dict[str, str],
-    api_key: str | None,
+    resolved_api_key: str,
     base_url: str,
     output_root: Path,
     timeout: int,
     overwrite: bool,
     duration_log_path: Path,
-    api_key_file: str | None,
 ) -> Path | None:
     target_dir = migrate_dataset_dir(dataset_spec, output_root)
     flatten_dataset_root_if_needed(target_dir, dataset_spec["output_subdir"])
@@ -745,7 +744,6 @@ def download_dataset(
             append_duration_log(duration_log_path, resolve_display_name(target_dir, dataset_spec["name"]), summary)
         return None
 
-    resolved_api_key = resolve_api_key(api_key, api_key_file)
     info = get_download_info(base_url, dataset_spec["dataset_id"], resolved_api_key, timeout)
     download_url = info["downloadUrl"]
     expected_size = info.get("sizeBytes")
@@ -777,6 +775,7 @@ def download_dataset(
 
     extraction_dir = resolve_extraction_dir(destination)
     extract_archive(destination, extraction_dir, overwrite)
+    flatten_dataset_root_if_needed(extraction_dir, dataset_spec["output_subdir"])
     print(f"完成：{extraction_dir}")
     report_dataset_duration(dataset_spec["name"], extraction_dir)
     summary = read_cached_duration_summary(extraction_dir)
@@ -793,18 +792,18 @@ def main() -> int:
         duration_log_path = output_root / STAT_LOG_FILENAME
         if duration_log_path.exists():
             duration_log_path.unlink()
+        resolved_api_key = resolve_api_key(args.api_key, args.api_key_file)
         for index, dataset_spec in enumerate(DATASET_SPECS):
             if index > 0:
                 print(f"\n{DATASET_RECORD_SEPARATOR}")
             download_dataset(
                 dataset_spec=dataset_spec,
-                api_key=args.api_key,
+                resolved_api_key=resolved_api_key,
                 base_url=args.base_url,
                 output_root=output_root,
                 timeout=args.timeout,
                 overwrite=args.overwrite,
                 duration_log_path=duration_log_path,
-                api_key_file=args.api_key_file,
             )
         print(
             "\n資料集下載或確認完成後，可執行前處理："

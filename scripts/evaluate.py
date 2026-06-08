@@ -54,11 +54,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-samples", type=int, help="只評估前 N 筆樣本。")
     parser.add_argument("--batch-size", type=int, help="覆蓋評估批次大小。")
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        help="覆蓋評估 DataLoader worker 數；共享記憶體不足時建議設為 0。",
+    )
     parser.add_argument("--device", help="覆蓋評估裝置，例如 cuda 或 cpu。")
     parser.add_argument("--output-dir", default="artifacts/eval", help="評估輸出資料夾。")
     parser.add_argument("--adapter-dir", help="single 模式覆蓋 adapter 權重資料夾。")
     parser.add_argument("--router-checkpoint", help="router 模式覆蓋路由權重路徑。")
     return parser.parse_args()
+
+
+def apply_eval_runtime_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    if args.dataloader_num_workers is None:
+        return
+    train_cfg = get_train_config(config)
+    training_cfg = train_cfg.setdefault("training", {})
+    training_cfg["dataloader_num_workers"] = max(0, int(args.dataloader_num_workers))
+    if int(args.dataloader_num_workers) <= 0:
+        training_cfg["dataloader_persistent_workers"] = False
+        training_cfg["dataloader_prefetch_factor"] = None
 
 
 def get_train_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -136,6 +152,28 @@ def build_autocast(device: torch.device, training_cfg: dict[str, Any]):
     return nullcontext()
 
 
+def load_speech_model_from_pretrained(model_cls, model_name_or_path: str, *, dtype: torch.dtype, **kwargs):
+    try:
+        return model_cls.from_pretrained(
+            model_name_or_path,
+            torch_dtype=dtype,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "torch_dtype" not in str(exc):
+            raise
+    try:
+        return model_cls.from_pretrained(
+            model_name_or_path,
+            dtype=dtype,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "dtype" not in str(exc):
+            raise
+    return model_cls.from_pretrained(model_name_or_path, **kwargs)
+
+
 def synchronize_for_timing(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -163,10 +201,32 @@ def configure_generation(model, model_cfg: dict[str, Any], training_cfg: dict[st
             generation_config.task = task
             generation_config.forced_decoder_ids = None
             generation_config.suppress_tokens = []
-    return {
+        if config is not None:
+            for attr in ("max_length", "suppress_tokens", "begin_suppress_tokens"):
+                if generation_config is not None and hasattr(config, attr):
+                    value = getattr(config, attr)
+                    if value is not None:
+                        setattr(generation_config, attr, value)
+                if attr in getattr(config, "__dict__", {}):
+                    delattr(config, attr)
+    kwargs = {
         "max_length": int(training_cfg.get("generation_max_length", 96)),
         "num_beams": int(training_cfg.get("generation_num_beams", 1)),
     }
+    optional_int_keys = {
+        "no_repeat_ngram_size": "generation_no_repeat_ngram_size",
+    }
+    optional_float_keys = {
+        "repetition_penalty": "generation_repetition_penalty",
+        "length_penalty": "generation_length_penalty",
+    }
+    for generate_key, config_key in optional_int_keys.items():
+        if training_cfg.get(config_key) is not None:
+            kwargs[generate_key] = int(training_cfg[config_key])
+    for generate_key, config_key in optional_float_keys.items():
+        if training_cfg.get(config_key) is not None:
+            kwargs[generate_key] = float(training_cfg[config_key])
+    return kwargs
 
 
 def language_adapter_map(train_cfg: dict[str, Any]) -> dict[str, str]:
@@ -322,7 +382,15 @@ def build_dataloader(
     batch_size: int,
     device: torch.device,
 ) -> DataLoader:
-    num_workers = max(0, int(training_cfg.get("dataloader_num_workers", 0)))
+    # Evaluation often runs inside containers with small /dev/shm. Default to
+    # single-process loading unless an evaluation-specific worker count is set.
+    worker_value = training_cfg.get(
+        "eval_dataloader_num_workers",
+        training_cfg.get("dataloader_num_workers", 0)
+        if bool(training_cfg.get("allow_eval_dataloader_workers", False))
+        else 0,
+    )
+    num_workers = max(0, int(worker_value))
     kwargs: dict[str, Any] = {
         "batch_size": max(1, int(batch_size)),
         "shuffle": False,
@@ -424,15 +492,20 @@ def load_base_model(model_cfg: dict[str, Any], device: torch.device, training_cf
     from transformers import AutoModelForSpeechSeq2Seq
 
     model_name_or_path = str(model_cfg.get("model_name_or_path") or "openai/whisper-medium")
-    kwargs = {"dtype": resolve_model_dtype(device, training_cfg)}
+    model_dtype = resolve_model_dtype(device, training_cfg)
     try:
-        return AutoModelForSpeechSeq2Seq.from_pretrained(
+        return load_speech_model_from_pretrained(
+            AutoModelForSpeechSeq2Seq,
             model_name_or_path,
+            dtype=model_dtype,
             local_files_only=True,
-            **kwargs,
         )
     except Exception:
-        return AutoModelForSpeechSeq2Seq.from_pretrained(model_name_or_path, **kwargs)
+        return load_speech_model_from_pretrained(
+            AutoModelForSpeechSeq2Seq,
+            model_name_or_path,
+            dtype=model_dtype,
+        )
 
 
 def load_adapted_model(
@@ -1405,7 +1478,8 @@ def evaluate_hf_whisper(
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model_name_or_path)
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model = load_speech_model_from_pretrained(
+        AutoModelForSpeechSeq2Seq,
         model_name_or_path,
         dtype=resolve_model_dtype(device, training_cfg),
     )
@@ -1502,6 +1576,7 @@ def evaluate_hf_whisper(
 def main() -> int:
     args = parse_args()
     config = load_config(args.config)
+    apply_eval_runtime_overrides(config, args)
     if args.mode == "single":
         if not args.language:
             raise ValueError("single 模式必須指定 --language，例如 --language zh-TW。")

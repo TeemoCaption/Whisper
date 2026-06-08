@@ -362,6 +362,15 @@ def main() -> None:
     epochs = float(args.num_epochs if args.num_epochs is not None else router_cfg.get("num_train_epochs", 10.0))
     update_steps = max(1, int(len(train_loader) * epochs))
     warmup_steps = int(router_cfg.get("warmup_steps", 100))
+    scheduler_type = str(router_cfg.get("lr_scheduler_type", "linear")).lower()
+    min_lr_ratio = max(0.0, min(1.0, float(router_cfg.get("min_lr_ratio", 0.0))))
+    supported_schedulers = {"linear", "linear_floor", "linear_with_floor", "constant"}
+    if scheduler_type not in supported_schedulers:
+        print(
+            f"未支援的路由器學習率排程 {scheduler_type!r}，改用線性排程。",
+            flush=True,
+        )
+        scheduler_type = "linear"
     early_stopping_cfg = dict(router_cfg.get("early_stopping") or {})
     early_stopping_enabled = bool(early_stopping_cfg.get("enabled", True))
     early_stopping_patience = max(1, int(early_stopping_cfg.get("patience", 3)))
@@ -374,7 +383,12 @@ def main() -> None:
         if warmup_steps > 0 and step < warmup_steps:
             return max(1e-8, step / max(1, warmup_steps))
         remaining = max(1, update_steps - warmup_steps)
-        return max(0.0, (update_steps - step) / remaining)
+        linear_value = max(0.0, (update_steps - step) / remaining)
+        if scheduler_type in {"linear_floor", "linear_with_floor"}:
+            return max(min_lr_ratio, linear_value)
+        if scheduler_type == "constant":
+            return 1.0
+        return linear_value
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     wandb_run = init_wandb(router_cfg, output_dir)
@@ -389,6 +403,10 @@ def main() -> None:
                 "eval_samples": len(eval_dataset),
                 "output_dir": str(output_dir),
                 "device": str(device),
+                "learning_rate": float(router_cfg.get("learning_rate", 1.0e-4)),
+                "lr_scheduler_type": scheduler_type,
+                "min_lr_ratio": min_lr_ratio,
+                "warmup_steps": warmup_steps,
                 "router": {
                     "pooling": spec.pooling,
                     "attention_hidden_size": spec.attention_hidden_size,
