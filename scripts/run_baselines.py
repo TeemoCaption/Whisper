@@ -25,6 +25,9 @@ TABLE_FIELDS = [
     "推論時間",
     "即時率",
     "路由準確率",
+    "巨平均準確率",
+    "巨平均精確率",
+    "巨平均召回率",
     "巨平均F1",
 ]
 
@@ -144,6 +147,7 @@ def run_finetune_job(
     config_path: str,
     dataloader_num_workers: int | None,
 ) -> None:
+    finetune_cfg = {**defaults, **job}
     command = [
         sys.executable,
         str(ROOT / "scripts" / "ft_whisper.py"),
@@ -156,22 +160,31 @@ def run_finetune_job(
         "--output-dir",
         str(job["output_dir"]),
     ]
-    if defaults.get("num_train_epochs") is not None:
-        command.extend(["--num-train-epochs", str(defaults["num_train_epochs"])])
-    if defaults.get("learning_rate") is not None:
-        command.extend(["--learning-rate", str(defaults["learning_rate"])])
-    if defaults.get("lr_scheduler_type") is not None:
-        command.extend(["--lr-scheduler-type", str(defaults["lr_scheduler_type"])])
-    if defaults.get("min_lr_ratio") is not None:
-        command.extend(["--min-lr-ratio", str(defaults["min_lr_ratio"])])
-    if defaults.get("weight_decay") is not None:
-        command.extend(["--weight-decay", str(defaults["weight_decay"])])
-    if defaults.get("batch_size") is not None:
-        command.extend(["--batch-size", str(defaults["batch_size"])])
+    if finetune_cfg.get("num_train_epochs") is not None:
+        command.extend(["--num-train-epochs", str(finetune_cfg["num_train_epochs"])])
+    if finetune_cfg.get("learning_rate") is not None:
+        command.extend(["--learning-rate", str(finetune_cfg["learning_rate"])])
+    if finetune_cfg.get("lr_scheduler_type") is not None:
+        command.extend(["--lr-scheduler-type", str(finetune_cfg["lr_scheduler_type"])])
+    if finetune_cfg.get("min_lr_ratio") is not None:
+        command.extend(["--min-lr-ratio", str(finetune_cfg["min_lr_ratio"])])
+    if finetune_cfg.get("warmup_steps") is not None:
+        command.extend(["--warmup-steps", str(finetune_cfg["warmup_steps"])])
+    if finetune_cfg.get("weight_decay") is not None:
+        command.extend(["--weight-decay", str(finetune_cfg["weight_decay"])])
+    if finetune_cfg.get("unfreeze_encoder_last_n_layers") is not None:
+        command.extend(
+            [
+                "--unfreeze-encoder-last-n-layers",
+                str(finetune_cfg["unfreeze_encoder_last_n_layers"]),
+            ]
+        )
+    if finetune_cfg.get("batch_size") is not None:
+        command.extend(["--batch-size", str(finetune_cfg["batch_size"])])
     if dataloader_num_workers is not None:
         command.extend(["--dataloader-num-workers", str(dataloader_num_workers)])
-    if defaults.get("device"):
-        command.extend(["--device", str(defaults["device"])])
+    if finetune_cfg.get("device"):
+        command.extend(["--device", str(finetune_cfg["device"])])
     print(f"finetune_start name={job['name']} output_dir={job['output_dir']}", flush=True)
     print(f"finetune_command={shlex.join(command)}", flush=True)
     subprocess.run(command, check=True)
@@ -309,65 +322,34 @@ def base_row(
         "推論時間": "" if inference_seconds is None else inference_seconds,
         "即時率": "" if realtime_factor is None else realtime_factor,
         "路由準確率": "",
+        "巨平均準確率": "",
+        "巨平均精確率": "",
+        "巨平均召回率": "",
         "巨平均F1": "",
     }
 
 
 def router_rows(entry: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
-    total_audio = float(payload.get("total_audio_seconds") or 0.0)
-
-    def ratio(seconds: float | None) -> float | None:
-        if seconds is None or total_audio <= 0.0:
-            return None
-        return float(seconds) / total_audio
-
-    rows = [
-        base_row(
-            table="router_test",
-            entry={
-                **entry,
-                "display_name": "正確轉接模組",
-                "training_method": "依真實語言標籤選擇",
-                "test_data": "zh-TW + nan-tw test",
-            },
-            payload=payload,
-            trainable_parameters=None,
-            cer=payload.get("cer_oracle_adapter"),
-            inference_seconds=payload.get("oracle_generation_seconds"),
-            realtime_factor=ratio(payload.get("oracle_generation_seconds")),
-        ),
-        base_row(
-            table="router_test",
-            entry={
-                **entry,
-                "display_name": "路由器選擇",
-                "training_method": "由對比式路由器自動選擇",
-                "test_data": "zh-TW + nan-tw test",
-            },
-            payload=payload,
-            trainable_parameters=None,
-            cer=payload.get("cer_router_selected"),
-            inference_seconds=payload.get("inference_seconds"),
-            realtime_factor=payload.get("realtime_factor"),
-        ),
-        base_row(
-            table="router_test",
-            entry={
-                **entry,
-                "display_name": "錯誤轉接模組",
-                "training_method": "強制選擇非真實語言轉接模組",
-                "test_data": "zh-TW + nan-tw test",
-            },
-            payload=payload,
-            trainable_parameters=None,
-            cer=payload.get("cer_wrong_adapter"),
-            inference_seconds=payload.get("wrong_generation_seconds"),
-            realtime_factor=ratio(payload.get("wrong_generation_seconds")),
-        ),
-    ]
-    rows[1]["路由準確率"] = payload.get("router_accuracy", "")
-    rows[1]["巨平均F1"] = payload.get("router_macro_f1", "")
-    return rows
+    row = base_row(
+        table="router_test",
+        entry={
+            **entry,
+            "display_name": "路由器選擇",
+            "training_method": "由對比式路由器自動選擇",
+            "test_data": "zh-TW + nan-tw test",
+        },
+        payload=payload,
+        trainable_parameters=None,
+        cer=payload.get("cer_router_selected"),
+        inference_seconds=payload.get("inference_seconds"),
+        realtime_factor=payload.get("realtime_factor"),
+    )
+    row["路由準確率"] = payload.get("router_accuracy", "")
+    row["巨平均準確率"] = payload.get("router_macro_accuracy", "")
+    row["巨平均精確率"] = payload.get("router_macro_precision", "")
+    row["巨平均召回率"] = payload.get("router_macro_recall", "")
+    row["巨平均F1"] = payload.get("router_macro_f1", "")
+    return [row]
 
 
 def rows_for_payload(entry: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -12,31 +12,55 @@ finetune_jobs:
     language: zh-TW
     model_name_or_path: openai/whisper-small
     output_dir: artifacts/baselines/whisper_small_ft_zh_tw_h100
+    learning_rate: 1.0e-6
+    min_lr_ratio: 0.1
+    warmup_steps: 1000
+    weight_decay: 0.05
 
   - name: whisper_medium_ft_zh_tw
     language: zh-TW
     model_name_or_path: openai/whisper-medium
     output_dir: artifacts/baselines/whisper_medium_ft_zh_tw_h100
+    learning_rate: 4.0e-6
+    min_lr_ratio: 0.15
+    warmup_steps: 700
+    weight_decay: 0.015
 
   - name: whisper_large_v3_turbo_ft_zh_tw
     language: zh-TW
     model_name_or_path: openai/whisper-large-v3-turbo
     output_dir: artifacts/baselines/whisper_large_v3_turbo_ft_zh_tw_h100
+    learning_rate: 2.0e-6
+    min_lr_ratio: 0.1
+    warmup_steps: 900
+    weight_decay: 0.03
 
   - name: whisper_small_ft_nan_tw
     language: nan-tw
     model_name_or_path: openai/whisper-small
     output_dir: artifacts/baselines/whisper_small_ft_nan_tw_h100
+    learning_rate: 3.0e-6
+    min_lr_ratio: 0.2
+    warmup_steps: 800
+    weight_decay: 0.02
 
   - name: whisper_medium_ft_nan_tw
     language: nan-tw
     model_name_or_path: openai/whisper-medium
     output_dir: artifacts/baselines/whisper_medium_ft_nan_tw_h100
+    learning_rate: 2.0e-6
+    min_lr_ratio: 0.1
+    warmup_steps: 1000
+    weight_decay: 0.03
 
   - name: whisper_large_v3_turbo_ft_nan_tw
     language: nan-tw
     model_name_or_path: openai/whisper-large-v3-turbo
     output_dir: artifacts/baselines/whisper_large_v3_turbo_ft_nan_tw_h100
+    learning_rate: 4.0e-6
+    min_lr_ratio: 0.2
+    warmup_steps: 700
+    weight_decay: 0.015
 
 baselines:
   - name: router_full

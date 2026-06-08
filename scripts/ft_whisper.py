@@ -41,7 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, help="覆寫學習率。")
     parser.add_argument("--lr-scheduler-type", help="覆寫學習率排程。")
     parser.add_argument("--min-lr-ratio", type=float, help="覆寫最低學習率比例。")
+    parser.add_argument("--warmup-steps", type=int, help="覆寫 warmup 步數。")
     parser.add_argument("--weight-decay", type=float, help="覆寫權重衰減。")
+    parser.add_argument(
+        "--unfreeze-encoder-last-n-layers",
+        type=int,
+        help="覆寫解凍 encoder 最後 N 層。",
+    )
     parser.add_argument("--batch-size", type=int, help="覆寫訓練與驗證批次大小。")
     parser.add_argument(
         "--dataloader-num-workers",
@@ -91,7 +97,9 @@ def build_finetune_config(args: argparse.Namespace) -> dict[str, Any]:
         {
             "model_name_or_path": args.model_name_or_path,
             "freeze_encoder": True,
-            "unfreeze_encoder_last_n_layers": 4,
+            "unfreeze_encoder_last_n_layers": 4
+            if args.unfreeze_encoder_last_n_layers is None
+            else max(0, int(args.unfreeze_encoder_last_n_layers)),
             "train_decoder": False,
         }
     )
@@ -112,6 +120,8 @@ def build_finetune_config(args: argparse.Namespace) -> dict[str, Any]:
         training_cfg["lr_scheduler_type"] = str(args.lr_scheduler_type)
     if args.min_lr_ratio is not None:
         training_cfg["min_lr_ratio"] = float(args.min_lr_ratio)
+    if args.warmup_steps is not None:
+        training_cfg["warmup_steps"] = max(0, int(args.warmup_steps))
     if args.weight_decay is not None:
         training_cfg["weight_decay"] = float(args.weight_decay)
     if args.batch_size is not None:
@@ -149,12 +159,16 @@ def main() -> int:
         json.dumps(config, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    model_cfg = config["whisper_finetune"]["model"]
     training_cfg = config["whisper_finetune"]["training"]
     print(
         "finetune_runtime="
         + json.dumps(
             {
                 "output_dir": str(output_dir),
+                "unfreeze_encoder_last_n_layers": model_cfg.get(
+                    "unfreeze_encoder_last_n_layers"
+                ),
                 "per_device_train_batch_size": training_cfg.get(
                     "per_device_train_batch_size"
                 ),
@@ -164,6 +178,7 @@ def main() -> int:
                 "learning_rate": training_cfg.get("learning_rate"),
                 "lr_scheduler_type": training_cfg.get("lr_scheduler_type"),
                 "min_lr_ratio": training_cfg.get("min_lr_ratio"),
+                "warmup_steps": training_cfg.get("warmup_steps"),
                 "weight_decay": training_cfg.get("weight_decay"),
                 "dataloader_num_workers": training_cfg.get(
                     "dataloader_num_workers"

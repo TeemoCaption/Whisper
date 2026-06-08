@@ -287,9 +287,10 @@ def validate_configs(failures: list[str]) -> None:
     )
     require(
         "cer_router_selected" in evaluate_script
-        and "cer_oracle_adapter" in evaluate_script
-        and "cer_wrong_adapter" in evaluate_script,
-        "完整路由評估應輸出 router-selected、oracle 與 wrong adapter CER。",
+        and "router_accuracy" in evaluate_script
+        and "router_macro_accuracy" in evaluate_script
+        and "router_macro_f1" in evaluate_script,
+        "完整路由評估應輸出 router-selected CER 與路由器判斷指標。",
         failures,
     )
     baseline_types = {

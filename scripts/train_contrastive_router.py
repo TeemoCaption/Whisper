@@ -137,6 +137,7 @@ def compute_metrics(
     for pred, ref in zip(predictions, references):
         confusion[ref][pred] += 1
 
+    accuracy_scores: list[float] = []
     precision_scores: list[float] = []
     recall_scores: list[float] = []
     f1_scores: list[float] = []
@@ -144,18 +145,23 @@ def compute_metrics(
         tp = confusion[label_id][label_id]
         fp = sum(confusion[row][label_id] for row in range(num_labels) if row != label_id)
         fn = sum(confusion[label_id][col] for col in range(num_labels) if col != label_id)
+        tn = total - tp - fp - fn
+        class_accuracy = (tp + tn) / max(1, total)
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
         f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+        accuracy_scores.append(class_accuracy)
         precision_scores.append(precision)
         recall_scores.append(recall)
         f1_scores.append(f1)
 
     return {
         "accuracy": correct / max(1, total),
+        "macro_accuracy": sum(accuracy_scores) / max(1, len(accuracy_scores)),
         "macro_precision": sum(precision_scores) / max(1, len(precision_scores)),
         "macro_recall": sum(recall_scores) / max(1, len(recall_scores)),
         "macro_f1": sum(f1_scores) / max(1, len(f1_scores)),
+        "per_label_accuracy": accuracy_scores,
         "per_label_precision": precision_scores,
         "per_label_recall": recall_scores,
         "per_label_f1": f1_scores,

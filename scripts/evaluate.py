@@ -619,6 +619,7 @@ def compute_classification_metrics(
     for pred, ref in zip(predictions, references):
         confusion[ref][pred] += 1
 
+    accuracy_scores: list[float] = []
     precision_scores: list[float] = []
     recall_scores: list[float] = []
     f1_scores: list[float] = []
@@ -626,18 +627,23 @@ def compute_classification_metrics(
         tp = confusion[label_id][label_id]
         fp = sum(confusion[row][label_id] for row in range(num_labels) if row != label_id)
         fn = sum(confusion[label_id][col] for col in range(num_labels) if col != label_id)
+        tn = total - tp - fp - fn
+        class_accuracy = (tp + tn) / max(1, total)
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
         f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+        accuracy_scores.append(class_accuracy)
         precision_scores.append(precision)
         recall_scores.append(recall)
         f1_scores.append(f1)
 
     return {
         "router_accuracy": correct / max(1, total),
+        "router_macro_accuracy": sum(accuracy_scores) / max(1, len(accuracy_scores)),
         "router_macro_precision": sum(precision_scores) / max(1, len(precision_scores)),
         "router_macro_recall": sum(recall_scores) / max(1, len(recall_scores)),
         "router_macro_f1": sum(f1_scores) / max(1, len(f1_scores)),
+        "router_per_label_accuracy": accuracy_scores,
         "router_per_label_precision": precision_scores,
         "router_per_label_recall": recall_scores,
         "router_per_label_f1": f1_scores,
@@ -1085,16 +1091,6 @@ def route_batch_with_scores(
     )
 
 
-def wrong_languages_for(labels: list[str], references: list[str]) -> list[str]:
-    wrong: list[str] = []
-    for reference in references:
-        candidates = [label for label in labels if label != reference]
-        if not candidates:
-            raise ValueError("wrong adapter 評估至少需要兩個語言標籤。")
-        wrong.append(candidates[0])
-    return wrong
-
-
 def evaluate_router(
     *,
     config: dict[str, Any],
@@ -1160,13 +1156,9 @@ def evaluate_router(
     predicted_label_ids: list[int] = []
     predicted_labels: list[str] = []
     selected_predictions: list[str] = []
-    oracle_predictions: list[str] = []
-    wrong_predictions: list[str] = []
     records: list[dict[str, Any]] = []
     router_seconds = 0.0
     selected_seconds = 0.0
-    oracle_seconds = 0.0
-    wrong_seconds = 0.0
     start = time.perf_counter()
 
     with torch.inference_mode():
@@ -1183,7 +1175,6 @@ def evaluate_router(
             router_seconds += batch_router_seconds
             batch_predicted_labels = [labels[index] for index in batch_route_ids]
             batch_reference_labels = [str(label) for label in batch["language_labels"]]
-            batch_wrong_labels = wrong_languages_for(labels, batch_reference_labels)
 
             batch_selected_predictions, batch_selected_seconds = generate_for_language_groups(
                 model=model,
@@ -1199,42 +1190,10 @@ def evaluate_router(
                 training_cfg=training_cfg,
                 generation_kwargs=generation_kwargs,
             )
-            batch_oracle_predictions, batch_oracle_seconds = generate_for_language_groups(
-                model=model,
-                processor=processor,
-                input_features=input_features,
-                attention_mask=batch.get("attention_mask").to(device)
-                if batch.get("attention_mask") is not None
-                else None,
-                languages=batch_reference_labels,
-                language_to_adapter=language_to_adapter,
-                data_cfg=data_cfg,
-                device=device,
-                training_cfg=training_cfg,
-                generation_kwargs=generation_kwargs,
-            )
-            batch_wrong_predictions, batch_wrong_seconds = generate_for_language_groups(
-                model=model,
-                processor=processor,
-                input_features=input_features,
-                attention_mask=batch.get("attention_mask").to(device)
-                if batch.get("attention_mask") is not None
-                else None,
-                languages=batch_wrong_labels,
-                language_to_adapter=language_to_adapter,
-                data_cfg=data_cfg,
-                device=device,
-                training_cfg=training_cfg,
-                generation_kwargs=generation_kwargs,
-            )
             selected_seconds += batch_selected_seconds
-            oracle_seconds += batch_oracle_seconds
-            wrong_seconds += batch_wrong_seconds
 
             references.extend(batch["references"])
             selected_predictions.extend(batch_selected_predictions)
-            oracle_predictions.extend(batch_oracle_predictions)
-            wrong_predictions.extend(batch_wrong_predictions)
             predicted_label_ids.extend(batch_route_ids)
             predicted_labels.extend(batch_predicted_labels)
             reference_label_ids.extend(label_to_id[label] for label in batch_reference_labels)
@@ -1245,7 +1204,6 @@ def evaluate_router(
                         "rel_path": batch["rel_paths"][index],
                         "language_label": batch_reference_labels[index],
                         "router_prediction": batch_predicted_labels[index],
-                        "wrong_adapter_language": batch_wrong_labels[index],
                         "reference": reference,
                         "duration_seconds": batch["duration_seconds"][index],
                     }
@@ -1266,11 +1224,9 @@ def evaluate_router(
     total_audio_seconds = sum(float(record["duration_seconds"]) for record in records)
     elapsed_seconds = time.perf_counter() - start
     payload_records: list[dict[str, Any]] = []
-    for record, selected, oracle, wrong, reference in zip(
+    for record, selected, reference in zip(
         records,
         selected_predictions,
-        oracle_predictions,
-        wrong_predictions,
         references,
     ):
         payload_records.append(
@@ -1278,11 +1234,7 @@ def evaluate_router(
                 **record,
                 "prediction": selected,
                 "router_selected_prediction": selected,
-                "oracle_adapter_prediction": oracle,
-                "wrong_adapter_prediction": wrong,
                 "char_error_rate": character_error_rate([selected], [reference]),
-                "oracle_char_error_rate": character_error_rate([oracle], [reference]),
-                "wrong_char_error_rate": character_error_rate([wrong], [reference]),
             }
         )
 
@@ -1296,12 +1248,8 @@ def evaluate_router(
         **router_metrics,
         "cer": character_error_rate(selected_predictions, references),
         "cer_router_selected": character_error_rate(selected_predictions, references),
-        "cer_oracle_adapter": character_error_rate(oracle_predictions, references),
-        "cer_wrong_adapter": character_error_rate(wrong_predictions, references),
         "router_inference_seconds": router_seconds,
         "router_selected_generation_seconds": selected_seconds,
-        "oracle_generation_seconds": oracle_seconds,
-        "wrong_generation_seconds": wrong_seconds,
         "inference_seconds": selected_total_seconds,
         "inference_seconds_per_sample": selected_total_seconds / max(1, len(references)),
         "total_audio_seconds": total_audio_seconds,
