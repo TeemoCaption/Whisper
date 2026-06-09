@@ -228,7 +228,7 @@ def build_router_feature_cache(
         desc=f"cache router features {split}",
         disable=bool(cfg.get("disable_tqdm", False)),
     )
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in progress:
             input_features = batch["input_features"].to(device)
             with build_autocast(device, cfg):
@@ -268,13 +268,20 @@ def batch_hidden_states(
     encoder,
     device: torch.device,
     cfg: dict[str, Any],
+    use_inference_mode: bool = True,
 ) -> torch.Tensor:
     if "hidden" in batch:
-        return batch["hidden"].to(device, non_blocking=True).float()
+        hidden = batch["hidden"].to(device, non_blocking=True).float()
+        is_inference_tensor = getattr(hidden, "is_inference", lambda: False)()
+        return hidden.clone() if is_inference_tensor else hidden
     input_features = batch["input_features"].to(device, non_blocking=True)
-    with torch.no_grad():
+    context = torch.inference_mode() if use_inference_mode else torch.no_grad()
+    with context:
         with build_autocast(device, cfg):
-            return encoder(input_features).last_hidden_state.float()
+            hidden = encoder(input_features).last_hidden_state.float()
+    if use_inference_mode:
+        return hidden
+    return hidden.detach()
 
 
 def build_autocast(device: torch.device, cfg: dict[str, Any]):
@@ -350,7 +357,7 @@ def evaluate(
         desc="eval contrastive router",
         disable=bool(cfg.get("disable_tqdm", False)),
     )
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in progress:
             labels = batch["labels"].to(device)
             hidden = batch_hidden_states(
@@ -697,6 +704,7 @@ def main() -> None:
                 encoder=encoder,
                 device=device,
                 cfg=router_cfg,
+                use_inference_mode=False,
             )
             loss, _outputs = router.compute_loss(hidden.float(), labels_tensor)
             (loss / gradient_accumulation_steps).backward()

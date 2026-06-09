@@ -103,19 +103,16 @@ router_jobs:
   - name: router_whisper_small
     model_name_or_path: openai/whisper-small
     output_dir: artifacts/models/contrastive_router_whisper_small_h100
-    feature_cache_dir: artifacts/models/contrastive_router_whisper_small_h100/feature_cache
     device: cuda
 
   - name: router_whisper_medium
     model_name_or_path: openai/whisper-medium
     output_dir: artifacts/models/contrastive_router_whisper_medium_h100
-    feature_cache_dir: artifacts/models/contrastive_router_whisper_medium_h100/feature_cache
     device: cuda
 
   - name: router_whisper_large_v3_turbo
     model_name_or_path: openai/whisper-large-v3-turbo
     output_dir: artifacts/models/contrastive_router_whisper_large_v3_turbo_h100
-    feature_cache_dir: artifacts/models/contrastive_router_whisper_large_v3_turbo_h100/feature_cache
     device: cuda
 
 baselines:

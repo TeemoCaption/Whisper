@@ -439,6 +439,7 @@ def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) 
     os.environ.setdefault("WANDB_PROJECT", project)
     os.environ.setdefault("WANDB_NAME", run_name)
     os.environ.setdefault("WANDB_LOG_MODEL", log_model)
+    os.environ.setdefault("WANDB_CONSOLE", "wrap")
 
 
 def get_process_memory_mb() -> float | None:
