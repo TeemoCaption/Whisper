@@ -93,22 +93,22 @@
 
 訓練對比式查詢路由器。路由器會使用凍結的語音編碼器表示產生查詢向量，並和 `zh-TW`、`nan-tw` 語言原型向量比對。若論文實驗同時比較 `openai/whisper-small`、`openai/whisper-medium` 與 `openai/whisper-large-v3-turbo`，三個底座模型需各自訓練一個路由器：
 
-- Windows 小型：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-small --output-dir artifacts\models\contrastive_router_whisper_small_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_small_h100\feature_cache --dataloader-num-workers 0`
-- Windows 中型：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-medium --output-dir artifacts\models\contrastive_router_whisper_medium_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_medium_h100\feature_cache --dataloader-num-workers 0`
-- Windows 大型高速版：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-large-v3-turbo --output-dir artifacts\models\contrastive_router_whisper_large_v3_turbo_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_large_v3_turbo_h100\feature_cache --dataloader-num-workers 0`
-- Linux 小型：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-small --output-dir artifacts/models/contrastive_router_whisper_small_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_small_h100/feature_cache --dataloader-num-workers 0`
-- Linux 中型：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-medium --output-dir artifacts/models/contrastive_router_whisper_medium_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_medium_h100/feature_cache --dataloader-num-workers 0`
-- Linux 大型高速版：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-large-v3-turbo --output-dir artifacts/models/contrastive_router_whisper_large_v3_turbo_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_large_v3_turbo_h100/feature_cache --dataloader-num-workers 0`
+- Windows 小型：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-small --output-dir artifacts\models\contrastive_router_whisper_small_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_small_h100\feature_cache`
+- Windows 中型：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-medium --output-dir artifacts\models\contrastive_router_whisper_medium_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_medium_h100\feature_cache`
+- Windows 大型高速版：`python .\scripts\train_contrastive_router.py --config .\configs\config_h100.yaml --model-name-or-path openai/whisper-large-v3-turbo --output-dir artifacts\models\contrastive_router_whisper_large_v3_turbo_h100 --feature-cache-dir artifacts\models\contrastive_router_whisper_large_v3_turbo_h100\feature_cache`
+- Linux 小型：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-small --output-dir artifacts/models/contrastive_router_whisper_small_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_small_h100/feature_cache`
+- Linux 中型：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-medium --output-dir artifacts/models/contrastive_router_whisper_medium_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_medium_h100/feature_cache`
+- Linux 大型高速版：`python scripts/train_contrastive_router.py --config configs/config_h100.yaml --model-name-or-path openai/whisper-large-v3-turbo --output-dir artifacts/models/contrastive_router_whisper_large_v3_turbo_h100 --feature-cache-dir artifacts/models/contrastive_router_whisper_large_v3_turbo_h100/feature_cache`
 
 也可以用專用批次腳本依 `configs/baselines.yaml` 的 `router_jobs` 自動補齊三個路由器；若某個型號已有 `contrastive_router.pt`，預設會略過：
 
-- Windows：`python .\scripts\run_routers.py --config .\configs\config_h100.yaml --dataloader-num-workers 0`
-- Linux：`python scripts/run_routers.py --config configs/config_h100.yaml --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_routers.py --config .\configs\config_h100.yaml`
+- Linux：`python scripts/run_routers.py --config configs/config_h100.yaml`
 
 若要強制重跑全部路由器：
 
-- Windows：`python .\scripts\run_routers.py --config .\configs\config_h100.yaml --redo --dataloader-num-workers 0`
-- Linux：`python scripts/run_routers.py --config configs/config_h100.yaml --redo --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_routers.py --config .\configs\config_h100.yaml --redo`
+- Linux：`python scripts/run_routers.py --config configs/config_h100.yaml --redo`
 
 訓練 `zh-TW` 語言專屬 AdaLoRA adapter：
 
@@ -132,13 +132,13 @@
 
 訓練全部本研究自適應低秩轉接模組。此腳本會依 `configs/baselines.yaml` 的 `adalora_jobs` 依序訓練三個型號與兩種語言；若某個型號與語言已有權重，預設會略過：
 
-- Windows：`python .\scripts\run_adalora.py --config .\configs\config_h100.yaml --dataloader-num-workers 0`
-- Linux：`python scripts/run_adalora.py --config configs/config_h100.yaml --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_adalora.py --config .\configs\config_h100.yaml`
+- Linux：`python scripts/run_adalora.py --config configs/config_h100.yaml`
 
 若要強制重跑全部本研究自適應低秩轉接模組：
 
-- Windows：`python .\scripts\run_adalora.py --config .\configs\config_h100.yaml --redo --dataloader-num-workers 0`
-- Linux：`python scripts/run_adalora.py --config configs/config_h100.yaml --redo --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_adalora.py --config .\configs\config_h100.yaml --redo`
+- Linux：`python scripts/run_adalora.py --config configs/config_h100.yaml --redo`
 
 ## 5. 評估
 
@@ -170,13 +170,13 @@
 
 若要同時比較目前轉接模組與 `configs/baselines.yaml` 中啟用的基線：
 
-- Windows：`python .\scripts\run_baselines.py --config .\configs\config_h100.yaml --split test --dataloader-num-workers 0`
-- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --split test --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_baselines.py --config .\configs\config_h100.yaml --split test`
+- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --split test`
 
 若要自動補齊缺少的一般微調、自適應低秩與路由器權重，並接著輸出三張論文比較表：
 
-- Windows：`python .\scripts\run_baselines.py --config .\configs\config_h100.yaml --split test --dataloader-num-workers 0`
-- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --split test --dataloader-num-workers 0`
+- Windows：`python .\scripts\run_baselines.py --config .\configs\config_h100.yaml --split test`
+- Linux：`python scripts/run_baselines.py --config configs/config_h100.yaml --split test`
 
 ## 6. 檢查
 

@@ -410,11 +410,13 @@ def init_wandb(cfg: dict[str, Any], output_dir: Path):
 
     os.environ.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project") or "whisper-tw"))
     os.environ.setdefault("WANDB_NAME", str(cfg.get("run_name") or output_dir.name))
+    os.environ["WANDB_CONSOLE"] = str(cfg.get("wandb_console") or "redirect").lower()
     os.environ["WANDB_DISABLE_STATS"] = "false"
     return wandb.init(
         project=os.environ["WANDB_PROJECT"],
         name=os.environ["WANDB_NAME"],
         config=cfg,
+        settings=wandb.Settings(console=os.environ["WANDB_CONSOLE"]),
     )
 
 

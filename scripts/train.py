@@ -436,10 +436,11 @@ def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) 
     project = str(training_cfg.get("wandb_project") or "whisper-tw")
     run_name = str(training_cfg.get("run_name") or output_dir.name)
     log_model = str(training_cfg.get("wandb_log_model", "false")).lower()
+    console = str(training_cfg.get("wandb_console") or "redirect").lower()
     os.environ.setdefault("WANDB_PROJECT", project)
     os.environ.setdefault("WANDB_NAME", run_name)
     os.environ.setdefault("WANDB_LOG_MODEL", log_model)
-    os.environ.setdefault("WANDB_CONSOLE", "wrap")
+    os.environ["WANDB_CONSOLE"] = console
 
 
 def get_process_memory_mb() -> float | None:
@@ -700,6 +701,9 @@ def setup_wandb_run(
         name=str(training_cfg.get("run_name") or output_dir.name),
         config=run_config,
         dir=str(output_dir),
+        settings=wandb.Settings(
+            console=str(training_cfg.get("wandb_console") or os.environ.get("WANDB_CONSOLE") or "redirect")
+        ),
     )
     run.define_metric("epoch")
     run.define_metric("*", step_metric="epoch")
