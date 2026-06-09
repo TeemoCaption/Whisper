@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import shlex
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
 TABLE_FIELDS = [
     "表格",
     "模型",
+    "底座模型",
     "訓練方式",
     "測試資料",
     "可訓練參數量",
@@ -61,6 +63,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="重新執行所有 Whisper 基線微調，即使輸出資料夾已存在。",
     )
+    parser.add_argument(
+        "--redo-adalora",
+        action="store_true",
+        help="重新執行所有本研究 AdaLoRA 訓練，即使輸出資料夾已存在。",
+    )
+    parser.add_argument(
+        "--redo-router",
+        action="store_true",
+        help="重新執行所有對比式路由器訓練，即使輸出資料夾已存在。",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +95,39 @@ def sanitize_name(value: str) -> str:
     text = str(value or "").strip().replace("-", "_")
     safe = "".join(char if char.isalnum() or char in "._" else "_" for char in text)
     return "_".join(part for part in safe.split("_") if part) or "model"
+
+
+def sanitize_model_name(model_name_or_path: str) -> str:
+    text = str(model_name_or_path or "whisper").strip().replace("\\", "/")
+    name = text.rstrip("/").split("/")[-1] or "whisper"
+    safe = "".join(char if char.isalnum() else "_" for char in name.lower())
+    return "_".join(part for part in safe.split("_") if part) or "whisper"
+
+
+def display_model_name(model_name_or_path: str | None) -> str:
+    if not model_name_or_path:
+        return ""
+    slug = sanitize_model_name(model_name_or_path)
+    return {
+        "whisper_small": "Whisper-small",
+        "whisper_medium": "Whisper-medium",
+        "whisper_large_v3_turbo": "Whisper-large-v3-turbo",
+    }.get(slug, str(model_name_or_path))
+
+
+def configure_entry_model(config: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    scoped_config = copy.deepcopy(config)
+    model_name_or_path = entry.get("model_name_or_path")
+    output_dir = entry.get("training_output_dir")
+    if model_name_or_path or output_dir:
+        train_cfg = scoped_config.setdefault("whisper_train", {})
+        if model_name_or_path:
+            model_cfg = train_cfg.setdefault("model", {})
+            model_cfg["model_name_or_path"] = str(model_name_or_path)
+        if output_dir:
+            training_cfg = train_cfg.setdefault("training", {})
+            training_cfg["output_dir"] = str(output_dir)
+    return scoped_config
 
 
 def write_eval_json(output_dir: str | Path, filename: str, payload: dict[str, Any]) -> Path:
@@ -140,6 +185,23 @@ def finetune_done(job: dict[str, Any]) -> bool:
     return summary_path.exists() and (final_dir / "config.json").exists()
 
 
+def adalora_done(job: dict[str, Any]) -> bool:
+    output_dir = Path(str(job["output_dir"]))
+    final_dir = output_dir / "final"
+    summary_path = output_dir / "best_summary.json"
+    adapter_name = str(job.get("adapter_name") or str(job["language"]).replace("-", "_").lower())
+    candidates = [
+        final_dir / "adapters" / adapter_name / "adapter_config.json",
+        final_dir / adapter_name / "adapter_config.json",
+    ]
+    return summary_path.exists() and any(candidate.exists() for candidate in candidates)
+
+
+def router_done(job: dict[str, Any]) -> bool:
+    output_dir = Path(str(job["output_dir"]))
+    return (output_dir / "contrastive_router.pt").exists()
+
+
 def run_finetune_job(
     *,
     job: dict[str, Any],
@@ -190,6 +252,70 @@ def run_finetune_job(
     subprocess.run(command, check=True)
 
 
+def run_adalora_job(
+    *,
+    job: dict[str, Any],
+    defaults: dict[str, Any],
+    config_path: str,
+    dataloader_num_workers: int | None,
+) -> None:
+    adalora_cfg = {**defaults, **job}
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "train.py"),
+        "--config",
+        config_path,
+        "--language",
+        str(job["language"]),
+        "--model-name-or-path",
+        str(job["model_name_or_path"]),
+        "--output-dir",
+        str(job["output_dir"]),
+    ]
+    if adalora_cfg.get("run_name"):
+        command.extend(["--run-name", str(adalora_cfg["run_name"])])
+    if adalora_cfg.get("batch_size") is not None:
+        command.extend(["--batch-size", str(adalora_cfg["batch_size"])])
+    print(f"adalora_start name={job['name']} output_dir={job['output_dir']}", flush=True)
+    if dataloader_num_workers is not None:
+        command.extend(["--dataloader-num-workers", str(dataloader_num_workers)])
+    if adalora_cfg.get("device"):
+        command.extend(["--device", str(adalora_cfg["device"])])
+    print(f"adalora_command={shlex.join(command)}", flush=True)
+    subprocess.run(command, check=True)
+
+
+def run_router_job(
+    *,
+    job: dict[str, Any],
+    defaults: dict[str, Any],
+    config_path: str,
+    dataloader_num_workers: int | None,
+) -> None:
+    router_cfg = {**defaults, **job}
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "train_contrastive_router.py"),
+        "--config",
+        config_path,
+        "--model-name-or-path",
+        str(job["model_name_or_path"]),
+        "--output-dir",
+        str(job["output_dir"]),
+    ]
+    if router_cfg.get("feature_cache_dir"):
+        command.extend(["--feature-cache-dir", str(router_cfg["feature_cache_dir"])])
+    if router_cfg.get("num_train_epochs") is not None:
+        command.extend(["--num-epochs", str(router_cfg["num_train_epochs"])])
+    if dataloader_num_workers is not None:
+        command.extend(["--dataloader-num-workers", str(dataloader_num_workers)])
+    if router_cfg.get("device"):
+        command.extend(["--device", str(router_cfg["device"])])
+    print(f"router_start name={job['name']} output_dir={job['output_dir']}", flush=True)
+    print(f"router_command={shlex.join(command)}", flush=True)
+    subprocess.run(command, check=True)
+
+
 def ensure_finetune_jobs(
     *,
     suite_cfg: dict[str, Any],
@@ -214,34 +340,79 @@ def ensure_finetune_jobs(
         )
 
 
+def ensure_adalora_jobs(
+    *,
+    suite_cfg: dict[str, Any],
+    config_path: str,
+    dataloader_num_workers: int | None,
+    redo_finetune: bool,
+) -> None:
+    defaults = dict(suite_cfg.get("adalora_defaults") or {})
+    for job in suite_cfg.get("adalora_jobs", []) or []:
+        if not isinstance(job, dict):
+            raise ValueError("adalora_jobs 每個項目都必須是 mapping。")
+        if adalora_done(job) and not redo_finetune:
+            print(f"adalora_skip_existing name={job['name']}", flush=True)
+            continue
+        if redo_finetune and adalora_done(job):
+            print(f"adalora_redo_existing name={job['name']}", flush=True)
+        run_adalora_job(
+            job=job,
+            defaults=defaults,
+            config_path=config_path,
+            dataloader_num_workers=dataloader_num_workers,
+        )
+
+
+def ensure_router_jobs(
+    *,
+    suite_cfg: dict[str, Any],
+    config_path: str,
+    dataloader_num_workers: int | None,
+    redo_finetune: bool,
+) -> None:
+    defaults = dict(suite_cfg.get("router_defaults") or {})
+    for job in suite_cfg.get("router_jobs", []) or []:
+        if not isinstance(job, dict):
+            raise ValueError("router_jobs 每個項目都必須是 mapping。")
+        if router_done(job) and not redo_finetune:
+            print(f"router_skip_existing name={job['name']}", flush=True)
+            continue
+        if redo_finetune and router_done(job):
+            print(f"router_redo_existing name={job['name']}", flush=True)
+        run_router_job(
+            job=job,
+            defaults=defaults,
+            config_path=config_path,
+            dataloader_num_workers=dataloader_num_workers,
+        )
+
+
 def check_required_artifacts(config: dict[str, Any], baselines: list[dict[str, Any]]) -> None:
     from scripts.evaluate import resolve_adapter_dir, resolve_router_checkpoint
 
-    required_router = any(item.get("type") == "adalora_router" for item in baselines)
-    required_languages = {
-        str(item.get("language"))
-        for item in baselines
-        if item.get("type") == "adalora_adapter"
-    }
     missing: list[str] = []
-    if required_router:
-        try:
-            resolve_router_checkpoint(config.get("whisper_train") or config)
-        except Exception as exc:
-            missing.append(
-                "對比式路由器權重缺少；請先執行 "
-                "python .\\scripts\\train_contrastive_router.py --config .\\configs\\config_h100.yaml "
-                f"({exc})"
-            )
-    for language in sorted(required_languages):
-        try:
-            resolve_adapter_dir(config.get("whisper_train") or config, language)
-        except Exception as exc:
-            missing.append(
-                f"{language} AdaLoRA 權重缺少；請先執行 "
-                f"python .\\scripts\\train.py --config .\\configs\\config_h100.yaml --language {language} "
-                f"({exc})"
-            )
+    for item in baselines:
+        baseline_type = str(item.get("type") or "")
+        scoped_config = configure_entry_model(config, item)
+        train_cfg = scoped_config.get("whisper_train") or scoped_config
+        if baseline_type in {"adalora_router", "router_metrics"}:
+            try:
+                resolve_router_checkpoint(train_cfg, item.get("router_checkpoint"))
+            except Exception as exc:
+                missing.append(
+                    f"{item.get('name')} 路由器權重缺少；請先執行對應 router_jobs "
+                    f"({exc})"
+                )
+        if baseline_type == "adalora_adapter":
+            language = str(item.get("language"))
+            try:
+                resolve_adapter_dir(train_cfg, language, item.get("adapter_dir"))
+            except Exception as exc:
+                missing.append(
+                    f"{item.get('name')} 的 {language} AdaLoRA 權重缺少；"
+                    f"請先執行對應 adalora_jobs ({exc})"
+                )
     if missing:
         raise FileNotFoundError("\n".join(missing))
 
@@ -256,12 +427,14 @@ def evaluate_entry(
     from scripts.evaluate import (
         evaluate_hf_whisper,
         evaluate_router,
+        evaluate_router_metrics,
         evaluate_single_adapter,
     )
 
     baseline_type = str(entry["type"])
+    scoped_config = configure_entry_model(config, entry)
     if dataloader_num_workers is not None:
-        train_cfg = config.setdefault("whisper_train", {})
+        train_cfg = scoped_config.setdefault("whisper_train", {})
         training_cfg = train_cfg.setdefault("training", {})
         training_cfg["dataloader_num_workers"] = max(0, int(dataloader_num_workers))
         if int(dataloader_num_workers) <= 0:
@@ -271,7 +444,7 @@ def evaluate_entry(
     batch_size = int(entry["batch_size"]) if entry.get("batch_size") else None
     if baseline_type == "adalora_adapter":
         return evaluate_single_adapter(
-            config=config,
+            config=scoped_config,
             language=str(entry["language"]),
             split=split,
             max_samples=None,
@@ -281,7 +454,16 @@ def evaluate_entry(
         )
     if baseline_type == "adalora_router":
         return evaluate_router(
-            config=config,
+            config=scoped_config,
+            split=split,
+            max_samples=None,
+            batch_size=batch_size,
+            device_name=device_name,
+            router_checkpoint=entry.get("router_checkpoint"),
+        )
+    if baseline_type == "router_metrics":
+        return evaluate_router_metrics(
+            config=scoped_config,
             split=split,
             max_samples=None,
             batch_size=batch_size,
@@ -315,6 +497,8 @@ def base_row(
     return {
         "表格": table,
         "模型": entry.get("display_name") or entry["name"],
+        "底座模型": entry.get("base_model")
+        or display_model_name(payload.get("model_name_or_path") or entry.get("model_name_or_path")),
         "訓練方式": entry.get("training_method") or "",
         "測試資料": entry.get("test_data") or payload.get("split") or "",
         "可訓練參數量": "" if trainable_parameters is None else trainable_parameters,
@@ -334,13 +518,13 @@ def router_rows(entry: dict[str, Any], payload: dict[str, Any]) -> list[dict[str
         table="router_test",
         entry={
             **entry,
-            "display_name": "路由器選擇",
-            "training_method": "由對比式路由器自動選擇",
+            "display_name": entry.get("display_name") or "對比式查詢路由器",
+            "training_method": entry.get("training_method") or "單獨路由器驗證",
             "test_data": "zh-TW + nan-tw test",
         },
         payload=payload,
         trainable_parameters=None,
-        cer=payload.get("cer_router_selected"),
+        cer=payload.get("cer_router_selected") if payload.get("mode") == "router" else None,
         inference_seconds=payload.get("inference_seconds"),
         realtime_factor=payload.get("realtime_factor"),
     )
@@ -393,6 +577,18 @@ def main() -> int:
         dataloader_num_workers=args.dataloader_num_workers,
         redo_finetune=args.redo_ft,
     )
+    ensure_adalora_jobs(
+        suite_cfg=suite_cfg,
+        config_path=args.config,
+        dataloader_num_workers=args.dataloader_num_workers,
+        redo_finetune=args.redo_adalora,
+    )
+    ensure_router_jobs(
+        suite_cfg=suite_cfg,
+        config_path=args.config,
+        dataloader_num_workers=args.dataloader_num_workers,
+        redo_finetune=args.redo_router,
+    )
 
     from whisper_tw.config import load_config
 
@@ -417,6 +613,15 @@ def main() -> int:
         payload["display_name"] = entry.get("display_name")
         payload["training_method"] = entry.get("training_method")
         payload["test_data"] = entry.get("test_data")
+        if payload.get("mode") == "router_metrics" and payload.get("confusion_matrix"):
+            from scripts.evaluate import write_confusion_matrix_artifacts
+
+            payload["confusion_matrix_paths"] = write_confusion_matrix_artifacts(
+                output_dir=output_dir,
+                name=f"{sanitize_name(name)}_{args.split}",
+                labels=[str(label) for label in payload["labels"]],
+                confusion_matrix=payload["confusion_matrix"],
+            )
         output_path = write_eval_json(
             output_dir,
             f"eval_{sanitize_name(name)}.json",

@@ -7,7 +7,7 @@ whisper_train:
     freeze_encoder: true
     unfreeze_encoder_last_n_layers: 4
     train_decoder: false
-    gradient_checkpointing: true
+    gradient_checkpointing: false
     gradient_checkpointing_use_reentrant: false
 
   peft:
@@ -88,7 +88,7 @@ whisper_train:
     warmup_steps: 500
     per_device_train_batch_size: 32
     per_device_eval_batch_size: 32
-    gradient_accumulation_steps: 1
+    gradient_accumulation_steps: 4
     eval_strategy: epoch
     save_strategy: epoch
     logging_steps: 25
@@ -97,13 +97,14 @@ whisper_train:
     predict_with_generate: false
     fp16: false
     bf16: true
+    tf32: true
     save_total_limit: 2
     load_best_model_at_end: true
     metric_for_best_model: eval_loss
     greater_is_better: false
     eval_cer_enabled: true
     eval_cer_max_samples: 1000
-    eval_cer_batch_size: 8
+    eval_cer_batch_size: 16
     spec_augment:
       enabled: true
       mask_time_prob: 0.03
@@ -116,6 +117,7 @@ whisper_train:
     run_name: whisper-medium-adalora-h100
     wandb_log_model: false
     dataloader_num_workers: 0
+    dataloader_pin_memory: true
     dataloader_persistent_workers: false
     dataloader_prefetch_factor: null
     disable_tqdm: false
@@ -137,7 +139,7 @@ whisper_train:
     weight_decay: 0.02
     max_grad_norm: 1.0
     pooling: attention
-    attention_hidden_size: 128
+    attention_hidden_size: 256
     embedding_size: 128
     hidden_ratio: 0.25
     dropout: 0.2
@@ -147,6 +149,10 @@ whisper_train:
     margin_loss_weight: 0.1
     per_device_train_batch_size: 32
     per_device_eval_batch_size: 32
+    gradient_accumulation_steps: 4
+    feature_cache_enabled: false
+    feature_cache_dir: artifacts/models/contrastive_router_h100/feature_cache
+    feature_cache_batch_size: 64
     dataloader_num_workers: 0
     dataloader_pin_memory: true
     dataloader_persistent_workers: false

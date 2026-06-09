@@ -60,6 +60,16 @@ def parse_args(
         default=default_config,
         help="Whisper 訓練設定檔路徑。",
     )
+    parser.add_argument("--model-name-or-path", help="覆寫 Whisper 底座模型。")
+    parser.add_argument("--output-dir", help="覆寫訓練輸出資料夾。")
+    parser.add_argument("--run-name", help="覆寫 wandb run 名稱。")
+    parser.add_argument("--batch-size", type=int, help="覆寫訓練與驗證批次大小。")
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        help="覆寫 DataLoader worker 數；共享記憶體不足時建議設為 0。",
+    )
+    parser.add_argument("--device", help="覆寫訓練裝置，例如 cuda 或 cpu。")
     if include_language_arg:
         parser.add_argument(
             "--language",
@@ -211,15 +221,22 @@ def apply_language_training_override(
         )
     for key, value in language_training_defaults.items():
         training_cfg[key] = value
+    model_cfg = train_cfg.get("model", {}) or {}
+    model_name_or_path = str(
+        model_cfg.get("model_name_or_path") or "openai/whisper-medium"
+    )
+    model_slug = sanitize_model_name(model_name_or_path)
     base_output_dir = Path(
-        str(training_cfg.get("output_dir") or "artifacts/models/whisper_medium_adalora")
+        str(training_cfg.get("output_dir") or f"artifacts/models/{model_slug}_adalora")
     )
     profile = _training_profile_name(base_output_dir)
     suffix = "" if profile == "local" else f"_{profile}"
     training_cfg["output_dir"] = str(
-        base_output_dir.parent / f"whisper_medium_adalora_{adapter_name}{suffix}"
+        base_output_dir.parent / f"{model_slug}_adalora_{adapter_name}{suffix}"
     )
-    training_cfg["run_name"] = f"whisper-medium-adalora-{adapter_name.replace('_', '-')}-{profile}"
+    training_cfg["run_name"] = (
+        f"{model_slug}-adalora-{adapter_name.replace('_', '-')}-{profile}"
+    )
     return adapter_name
 
 
@@ -984,6 +1001,28 @@ def main(
     )
     if not train_cfg:
         raise ValueError(f"設定檔缺少訓練區塊: {experiment_key or 'whisper_train'}")
+    if getattr(args, "model_name_or_path", None):
+        model_cfg_override = train_cfg.setdefault("model", {})
+        model_cfg_override["model_name_or_path"] = str(args.model_name_or_path)
+    if getattr(args, "output_dir", None):
+        training_cfg_override = train_cfg.setdefault("training", {})
+        training_cfg_override["output_dir"] = str(args.output_dir)
+    if getattr(args, "batch_size", None) is not None:
+        training_cfg_override = train_cfg.setdefault("training", {})
+        training_cfg_override["per_device_train_batch_size"] = int(args.batch_size)
+        training_cfg_override["per_device_eval_batch_size"] = int(args.batch_size)
+    if getattr(args, "dataloader_num_workers", None) is not None:
+        training_cfg_override = train_cfg.setdefault("training", {})
+        training_cfg_override["dataloader_num_workers"] = max(
+            0,
+            int(args.dataloader_num_workers),
+        )
+        if int(args.dataloader_num_workers) <= 0:
+            training_cfg_override["dataloader_persistent_workers"] = False
+            training_cfg_override["dataloader_prefetch_factor"] = None
+    if getattr(args, "device", None):
+        training_cfg_override = train_cfg.setdefault("training", {})
+        training_cfg_override["device"] = str(args.device)
     selected_adapter = apply_language_training_override(
         train_cfg,
         getattr(args, "language", None),
@@ -994,6 +1033,8 @@ def main(
     training_cfg = train_cfg.get("training", {}) or {}
     early_stopping_cfg = train_cfg.get("early_stopping", {}) or {}
     peft_cfg = train_cfg.get("peft", {}) or {}
+    if getattr(args, "run_name", None):
+        training_cfg["run_name"] = str(args.run_name)
     language_filter = data_cfg.get("language_filter")
     if language_filter is None and str(peft_cfg.get("adapter_scope") or "").lower() == "language":
         language_filter = peft_cfg.get("active_language")
@@ -1049,6 +1090,11 @@ def main(
             unfreeze_last_n_layers=unfreeze_encoder_last_n_layers,
             train_decoder=train_decoder,
         )
+        peft_info = {
+            "enabled": False,
+            "trainable_parameters": trainability["trainable_parameters"],
+            "total_parameters": trainability["total_parameters"],
+        }
     configure_gradient_checkpointing(model, model_cfg, is_peft_enabled(peft_cfg))
 
     train_dataset = WhisperTrainingDataset(

@@ -62,11 +62,97 @@ finetune_jobs:
     warmup_steps: 700
     weight_decay: 0.015
 
+adalora_jobs:
+  - name: adalora_small_zh_tw
+    language: zh-TW
+    model_name_or_path: openai/whisper-small
+    output_dir: artifacts/models/whisper_small_adalora_zh_tw_h100
+    run_name: whisper-small-adalora-zh-tw-h100
+
+  - name: adalora_medium_zh_tw
+    language: zh-TW
+    model_name_or_path: openai/whisper-medium
+    output_dir: artifacts/models/whisper_medium_adalora_zh_tw_h100
+    run_name: whisper-medium-adalora-zh-tw-h100
+
+  - name: adalora_large_v3_turbo_zh_tw
+    language: zh-TW
+    model_name_or_path: openai/whisper-large-v3-turbo
+    output_dir: artifacts/models/whisper_large_v3_turbo_adalora_zh_tw_h100
+    run_name: whisper-large-v3-turbo-adalora-zh-tw-h100
+
+  - name: adalora_small_nan_tw
+    language: nan-tw
+    model_name_or_path: openai/whisper-small
+    output_dir: artifacts/models/whisper_small_adalora_nan_tw_h100
+    run_name: whisper-small-adalora-nan-tw-h100
+
+  - name: adalora_medium_nan_tw
+    language: nan-tw
+    model_name_or_path: openai/whisper-medium
+    output_dir: artifacts/models/whisper_medium_adalora_nan_tw_h100
+    run_name: whisper-medium-adalora-nan-tw-h100
+
+  - name: adalora_large_v3_turbo_nan_tw
+    language: nan-tw
+    model_name_or_path: openai/whisper-large-v3-turbo
+    output_dir: artifacts/models/whisper_large_v3_turbo_adalora_nan_tw_h100
+    run_name: whisper-large-v3-turbo-adalora-nan-tw-h100
+
+router_jobs:
+  - name: router_whisper_small
+    model_name_or_path: openai/whisper-small
+    output_dir: artifacts/models/contrastive_router_whisper_small_h100
+    feature_cache_dir: artifacts/models/contrastive_router_whisper_small_h100/feature_cache
+    device: cuda
+
+  - name: router_whisper_medium
+    model_name_or_path: openai/whisper-medium
+    output_dir: artifacts/models/contrastive_router_whisper_medium_h100
+    feature_cache_dir: artifacts/models/contrastive_router_whisper_medium_h100/feature_cache
+    device: cuda
+
+  - name: router_whisper_large_v3_turbo
+    model_name_or_path: openai/whisper-large-v3-turbo
+    output_dir: artifacts/models/contrastive_router_whisper_large_v3_turbo_h100
+    feature_cache_dir: artifacts/models/contrastive_router_whisper_large_v3_turbo_h100/feature_cache
+    device: cuda
+
 baselines:
-  - name: router_full
+  - name: router_metrics_whisper_small
     enabled: true
     table: router_test
-    type: adalora_router
+    type: router_metrics
+    model_name_or_path: openai/whisper-small
+    router_checkpoint: artifacts/models/contrastive_router_whisper_small_h100/contrastive_router.pt
+    display_name: Whisper-small 對比式查詢路由器
+    base_model: Whisper-small
+    training_method: 單獨路由器驗證
+    test_data: zh-TW + nan-tw test
+    device: cuda
+
+  - name: router_metrics_whisper_medium
+    enabled: true
+    table: router_test
+    type: router_metrics
+    model_name_or_path: openai/whisper-medium
+    router_checkpoint: artifacts/models/contrastive_router_whisper_medium_h100/contrastive_router.pt
+    display_name: Whisper-medium 對比式查詢路由器
+    base_model: Whisper-medium
+    training_method: 單獨路由器驗證
+    test_data: zh-TW + nan-tw test
+    device: cuda
+
+  - name: router_metrics_whisper_large_v3_turbo
+    enabled: true
+    table: router_test
+    type: router_metrics
+    model_name_or_path: openai/whisper-large-v3-turbo
+    router_checkpoint: artifacts/models/contrastive_router_whisper_large_v3_turbo_h100/contrastive_router.pt
+    display_name: Whisper-large-v3-turbo 對比式查詢路由器
+    base_model: Whisper-large-v3-turbo
+    training_method: 單獨路由器驗證
+    test_data: zh-TW + nan-tw test
     device: cuda
 
   - name: whisper_small_zh_tw
@@ -76,6 +162,7 @@ baselines:
     model_name_or_path: openai/whisper-small
     language_filter: zh-TW
     display_name: Whisper-small
+    base_model: Whisper-small
     training_method: 未微調
     test_data: zh-TW test
     trainable_parameters: 0
@@ -88,6 +175,7 @@ baselines:
     model_name_or_path: openai/whisper-medium
     language_filter: zh-TW
     display_name: Whisper-medium
+    base_model: Whisper-medium
     training_method: 未微調
     test_data: zh-TW test
     trainable_parameters: 0
@@ -100,6 +188,7 @@ baselines:
     model_name_or_path: openai/whisper-large-v3-turbo
     language_filter: zh-TW
     display_name: Whisper-large-v3-turbo
+    base_model: Whisper-large-v3-turbo
     training_method: 未微調
     test_data: zh-TW test
     trainable_parameters: 0
@@ -112,6 +201,7 @@ baselines:
     model_name_or_path: MediaTek-Research/Breeze-ASR-25
     language_filter: zh-TW
     display_name: Breeze-ASR-25
+    base_model: Breeze-ASR-25
     training_method: 官方中文語音模型
     test_data: zh-TW test
     trainable_parameters: 0
@@ -124,6 +214,7 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_small_ft_zh_tw_h100/final
     language_filter: zh-TW
     display_name: Whisper-small 微調
+    base_model: Whisper-small
     training_method: 解凍編碼器最後4層
     test_data: zh-TW test
     summary_path: artifacts/baselines/whisper_small_ft_zh_tw_h100/best_summary.json
@@ -136,6 +227,7 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_medium_ft_zh_tw_h100/final
     language_filter: zh-TW
     display_name: Whisper-medium 微調
+    base_model: Whisper-medium
     training_method: 解凍編碼器最後4層
     test_data: zh-TW test
     summary_path: artifacts/baselines/whisper_medium_ft_zh_tw_h100/best_summary.json
@@ -148,17 +240,47 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_large_v3_turbo_ft_zh_tw_h100/final
     language_filter: zh-TW
     display_name: Whisper-large-v3-turbo 微調
+    base_model: Whisper-large-v3-turbo
     training_method: 解凍編碼器最後4層
     test_data: zh-TW test
     summary_path: artifacts/baselines/whisper_large_v3_turbo_ft_zh_tw_h100/best_summary.json
     device: cuda
 
-  - name: adalora_zh_tw
+  - name: adalora_small_zh_tw
     enabled: true
     table: zh_tw_baselines
     type: adalora_adapter
+    model_name_or_path: openai/whisper-small
     language: zh-TW
-    display_name: 本研究 zh-TW AdaLoRA
+    adapter_dir: artifacts/models/whisper_small_adalora_zh_tw_h100/final/adapters/zh_tw
+    display_name: Whisper-small + 本研究 AdaLoRA
+    base_model: Whisper-small
+    training_method: 語言專屬自適應低秩轉接模組
+    test_data: zh-TW test
+    device: cuda
+
+  - name: adalora_medium_zh_tw
+    enabled: true
+    table: zh_tw_baselines
+    type: adalora_adapter
+    model_name_or_path: openai/whisper-medium
+    language: zh-TW
+    adapter_dir: artifacts/models/whisper_medium_adalora_zh_tw_h100/final/adapters/zh_tw
+    display_name: Whisper-medium + 本研究 AdaLoRA
+    base_model: Whisper-medium
+    training_method: 語言專屬自適應低秩轉接模組
+    test_data: zh-TW test
+    device: cuda
+
+  - name: adalora_large_v3_turbo_zh_tw
+    enabled: true
+    table: zh_tw_baselines
+    type: adalora_adapter
+    model_name_or_path: openai/whisper-large-v3-turbo
+    language: zh-TW
+    adapter_dir: artifacts/models/whisper_large_v3_turbo_adalora_zh_tw_h100/final/adapters/zh_tw
+    display_name: Whisper-large-v3-turbo + 本研究 AdaLoRA
+    base_model: Whisper-large-v3-turbo
     training_method: 語言專屬自適應低秩轉接模組
     test_data: zh-TW test
     device: cuda
@@ -170,6 +292,7 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_small_ft_nan_tw_h100/final
     language_filter: nan-tw
     display_name: Whisper-small 微調
+    base_model: Whisper-small
     training_method: 解凍編碼器最後4層
     test_data: nan-tw test
     summary_path: artifacts/baselines/whisper_small_ft_nan_tw_h100/best_summary.json
@@ -182,6 +305,7 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_medium_ft_nan_tw_h100/final
     language_filter: nan-tw
     display_name: Whisper-medium 微調
+    base_model: Whisper-medium
     training_method: 解凍編碼器最後4層
     test_data: nan-tw test
     summary_path: artifacts/baselines/whisper_medium_ft_nan_tw_h100/best_summary.json
@@ -194,17 +318,47 @@ baselines:
     model_name_or_path: artifacts/baselines/whisper_large_v3_turbo_ft_nan_tw_h100/final
     language_filter: nan-tw
     display_name: Whisper-large-v3-turbo 微調
+    base_model: Whisper-large-v3-turbo
     training_method: 解凍編碼器最後4層
     test_data: nan-tw test
     summary_path: artifacts/baselines/whisper_large_v3_turbo_ft_nan_tw_h100/best_summary.json
     device: cuda
 
-  - name: adalora_nan_tw
+  - name: adalora_small_nan_tw
     enabled: true
     table: nan_tw_baselines
     type: adalora_adapter
+    model_name_or_path: openai/whisper-small
     language: nan-tw
-    display_name: 本研究 nan-tw AdaLoRA
+    adapter_dir: artifacts/models/whisper_small_adalora_nan_tw_h100/final/adapters/nan_tw
+    display_name: Whisper-small + 本研究 AdaLoRA
+    base_model: Whisper-small
+    training_method: 語言專屬自適應低秩轉接模組
+    test_data: nan-tw test
+    device: cuda
+
+  - name: adalora_medium_nan_tw
+    enabled: true
+    table: nan_tw_baselines
+    type: adalora_adapter
+    model_name_or_path: openai/whisper-medium
+    language: nan-tw
+    adapter_dir: artifacts/models/whisper_medium_adalora_nan_tw_h100/final/adapters/nan_tw
+    display_name: Whisper-medium + 本研究 AdaLoRA
+    base_model: Whisper-medium
+    training_method: 語言專屬自適應低秩轉接模組
+    test_data: nan-tw test
+    device: cuda
+
+  - name: adalora_large_v3_turbo_nan_tw
+    enabled: true
+    table: nan_tw_baselines
+    type: adalora_adapter
+    model_name_or_path: openai/whisper-large-v3-turbo
+    language: nan-tw
+    adapter_dir: artifacts/models/whisper_large_v3_turbo_adalora_nan_tw_h100/final/adapters/nan_tw
+    display_name: Whisper-large-v3-turbo + 本研究 AdaLoRA
+    base_model: Whisper-large-v3-turbo
     training_method: 語言專屬自適應低秩轉接模組
     test_data: nan-tw test
     device: cuda

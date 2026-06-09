@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
         help="覆蓋評估 DataLoader worker 數；共享記憶體不足時建議設為 0。",
     )
     parser.add_argument("--device", help="覆蓋評估裝置，例如 cuda 或 cpu。")
+    parser.add_argument("--model-name-or-path", help="覆寫 Whisper 底座模型。")
     parser.add_argument("--output-dir", default="artifacts/eval", help="評估輸出資料夾。")
     parser.add_argument("--adapter-dir", help="single 模式覆蓋 adapter 權重資料夾。")
     parser.add_argument("--router-checkpoint", help="router 模式覆蓋路由權重路徑。")
@@ -67,6 +68,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def apply_eval_runtime_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    if args.model_name_or_path:
+        train_cfg = get_train_config(config)
+        model_cfg = train_cfg.setdefault("model", {})
+        model_cfg["model_name_or_path"] = str(args.model_name_or_path)
     if args.dataloader_num_workers is None:
         return
     train_cfg = get_train_config(config)
@@ -105,6 +110,13 @@ def sanitize_name(value: str) -> str:
     safe = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
     safe = safe.strip("._-")
     return safe or "model"
+
+
+def sanitize_model_name(model_name_or_path: str) -> str:
+    text = str(model_name_or_path or "whisper").strip().replace("\\", "/")
+    name = text.rstrip("/").split("/")[-1] or "whisper"
+    safe = "".join(char if char.isalnum() else "_" for char in name.lower())
+    return "_".join(part for part in safe.split("_") if part) or "whisper"
 
 
 def sanitize_adapter_name(value: str) -> str:
@@ -250,12 +262,16 @@ def resolve_language_output_dir(train_cfg: dict[str, Any], language: str) -> Pat
         available = ", ".join(adapters) or "未設定"
         raise ValueError(f"找不到 {language!r} 對應的 adapter；可用語言: {available}。")
     training_cfg = get_training_config(train_cfg)
+    model_cfg = get_model_config(train_cfg)
+    model_slug = sanitize_model_name(
+        str(model_cfg.get("model_name_or_path") or "openai/whisper-medium")
+    )
     base_output_dir = Path(
-        str(training_cfg.get("output_dir") or "artifacts/models/whisper_medium_adalora")
+        str(training_cfg.get("output_dir") or f"artifacts/models/{model_slug}_adalora")
     )
     profile = training_profile_name(base_output_dir)
     suffix = "" if profile == "local" else f"_{profile}"
-    return base_output_dir.parent / f"whisper_medium_adalora_{adapters[language]}{suffix}"
+    return base_output_dir.parent / f"{model_slug}_adalora_{adapters[language]}{suffix}"
 
 
 def resolve_adapter_dir(
@@ -1009,6 +1025,7 @@ def evaluate_single_adapter(
         elapsed_seconds=time.perf_counter() - start,
         extra={
             "language": language,
+            "model_name_or_path": str(model_cfg.get("model_name_or_path") or "openai/whisper-medium"),
             "adapter_name": adapter_name,
             "adapter_dir": str(resolved_adapter_dir),
         },
@@ -1033,8 +1050,28 @@ def load_router(router_path: Path, device: torch.device) -> ContrastiveAdapterRo
     )
     router = ContrastiveAdapterRouter(spec).to(device)
     router.load_state_dict(payload["state_dict"])
+    router.checkpoint_model_name_or_path = str(payload.get("model_name_or_path") or "")
     router.eval()
     return router
+
+
+def validate_router_model_compatibility(
+    router: ContrastiveAdapterRouter,
+    model,
+    *,
+    model_name_or_path: str,
+) -> None:
+    config = getattr(get_base_model(model), "config", None)
+    model_hidden_size = int(getattr(config, "d_model", 0) or 0)
+    if model_hidden_size and int(router.spec.hidden_size) != model_hidden_size:
+        checkpoint_model = getattr(router, "checkpoint_model_name_or_path", "") or "未知"
+        raise ValueError(
+            "路由器與目前 Whisper 底座不相容："
+            f"路由器 hidden_size={router.spec.hidden_size} "
+            f"(checkpoint model={checkpoint_model})，"
+            f"目前模型 {model_name_or_path} hidden_size={model_hidden_size}。"
+            "請改用相同底座訓練出的路由器權重。"
+        )
 
 
 def route_batch(
@@ -1126,6 +1163,11 @@ def evaluate_router(
         training_cfg=training_cfg,
         device=device,
         adapter_dirs=adapter_dirs,
+    )
+    validate_router_model_compatibility(
+        router,
+        model,
+        model_name_or_path=str(model_cfg.get("model_name_or_path") or "openai/whisper-medium"),
     )
     generation_kwargs = configure_generation(model, model_cfg, training_cfg)
     dataset = SpeechEvalDataset(
@@ -1245,6 +1287,7 @@ def evaluate_router(
         "samples": len(references),
         "labels": labels,
         "router_checkpoint": str(router_path),
+        "model_name_or_path": str(model_cfg.get("model_name_or_path") or "openai/whisper-medium"),
         **router_metrics,
         "cer": character_error_rate(selected_predictions, references),
         "cer_router_selected": character_error_rate(selected_predictions, references),
@@ -1287,6 +1330,11 @@ def evaluate_router_metrics(
 
     processor = load_processor(model_cfg)
     model = load_base_model(model_cfg, device, training_cfg).to(device)
+    validate_router_model_compatibility(
+        router,
+        model,
+        model_name_or_path=str(model_cfg.get("model_name_or_path") or "openai/whisper-medium"),
+    )
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -1386,6 +1434,7 @@ def evaluate_router_metrics(
         "samples": len(reference_ids),
         "labels": labels,
         "router_checkpoint": str(router_path),
+        "model_name_or_path": str(model_cfg.get("model_name_or_path") or "openai/whisper-medium"),
         **router_metrics,
         "router_loss": sum(losses) / max(1, len(losses)),
         "avg_positive_similarity": avg_positive,
@@ -1525,6 +1574,10 @@ def main() -> int:
     args = parse_args()
     config = load_config(args.config)
     apply_eval_runtime_overrides(config, args)
+    train_cfg = get_train_config(config)
+    model_slug = sanitize_model_name(
+        str(get_model_config(train_cfg).get("model_name_or_path") or "openai/whisper-medium")
+    )
     if args.mode == "single":
         if not args.language:
             raise ValueError("single 模式必須指定 --language，例如 --language zh-TW。")
@@ -1537,7 +1590,10 @@ def main() -> int:
             device_name=args.device,
             adapter_dir=args.adapter_dir,
         )
-        filename = f"eval_adalora_{sanitize_name(str(args.language)).lower()}_{args.split}.json"
+        filename = (
+            f"eval_adalora_{model_slug}_"
+            f"{sanitize_name(str(args.language)).lower()}_{args.split}.json"
+        )
     elif args.mode == "router":
         payload = evaluate_router(
             config=config,
@@ -1547,7 +1603,7 @@ def main() -> int:
             device_name=args.device,
             router_checkpoint=args.router_checkpoint,
         )
-        filename = f"eval_router_full_{args.split}.json"
+        filename = f"eval_router_full_{model_slug}_{args.split}.json"
     else:
         payload = evaluate_router_metrics(
             config=config,
@@ -1557,10 +1613,10 @@ def main() -> int:
             device_name=args.device,
             router_checkpoint=args.router_checkpoint,
         )
-        filename = f"eval_router_metrics_{args.split}.json"
+        filename = f"eval_router_metrics_{model_slug}_{args.split}.json"
         payload["confusion_matrix_paths"] = write_confusion_matrix_artifacts(
             output_dir=args.output_dir,
-            name=f"router_metrics_{args.split}",
+            name=f"router_metrics_{model_slug}_{args.split}",
             labels=[str(label) for label in payload["labels"]],
             confusion_matrix=payload["confusion_matrix"],
         )

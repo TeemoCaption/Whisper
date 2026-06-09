@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import sys
 from contextlib import nullcontext
@@ -30,8 +32,13 @@ from whisper_tw.data import load_audio_waveform, read_common_voice_split
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="訓練對比式鑰匙查詢路由。")
+    parser = argparse.ArgumentParser(description="訓練對比式查詢路由器。")
     parser.add_argument("--config", default="configs/config.yaml", help="訓練設定檔。")
+    parser.add_argument("--model-name-or-path", help="覆寫 Whisper 底座模型。")
+    parser.add_argument("--output-dir", help="覆寫路由器輸出資料夾。")
+    parser.add_argument("--feature-cache-dir", help="覆寫路由器特徵快取資料夾。")
+    parser.add_argument("--device", help="覆寫訓練裝置，例如 cuda 或 cpu。")
+    parser.add_argument("--dataloader-num-workers", type=int, help="覆寫 DataLoader worker 數。")
     parser.add_argument("--max-train-samples", type=int, help="覆寫訓練樣本上限。")
     parser.add_argument("--max-eval-samples", type=int, help="覆寫驗證樣本上限。")
     parser.add_argument("--num-epochs", type=float, help="覆寫訓練週期數。")
@@ -115,6 +122,161 @@ class RouterCollator:
         return batch
 
 
+class CachedRouterDataset(Dataset):
+    def __init__(self, cache_dir: Path) -> None:
+        metadata_path = cache_dir / "metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"找不到路由器特徵快取 metadata: {metadata_path}")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.items = list(metadata.get("items") or [])
+        self.cache_dir = cache_dir
+        if not self.items:
+            raise ValueError(f"路由器特徵快取為空: {cache_dir}")
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        item = self.items[index]
+        try:
+            payload = torch.load(
+                self.cache_dir / str(item["file"]),
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:
+            payload = torch.load(
+                self.cache_dir / str(item["file"]),
+                map_location="cpu",
+            )
+        return {
+            "hidden": payload["hidden"],
+            "labels": int(payload["label"]),
+        }
+
+
+class CachedRouterCollator:
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        return {
+            "hidden": torch.stack([feature["hidden"] for feature in features]),
+            "labels": torch.tensor(
+                [int(feature["labels"]) for feature in features],
+                dtype=torch.long,
+            ),
+        }
+
+
+def cache_key(
+    *,
+    model_name_or_path: str,
+    split: str,
+    labels: list[str],
+    max_samples: int | None,
+    sample_rate: int,
+    max_audio_seconds: float,
+) -> str:
+    payload = json.dumps(
+        {
+            "model_name_or_path": model_name_or_path,
+            "split": split,
+            "labels": labels,
+            "max_samples": max_samples,
+            "sample_rate": sample_rate,
+            "max_audio_seconds": max_audio_seconds,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def build_router_feature_cache(
+    *,
+    dataset: RouterDataset,
+    collator: RouterCollator,
+    encoder,
+    device: torch.device,
+    cfg: dict[str, Any],
+    cache_dir: Path,
+    split: str,
+    model_name_or_path: str,
+    labels: list[str],
+) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = cache_dir / "metadata.json"
+    if metadata_path.exists():
+        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if int(existing.get("sample_count", -1)) == len(dataset):
+            print(f"使用既有路由器特徵快取: {cache_dir}", flush=True)
+            return
+
+    for stale_file in cache_dir.glob("*.pt"):
+        stale_file.unlink()
+
+    loader = DataLoader(
+        dataset,
+        batch_size=max(1, int(cfg.get("feature_cache_batch_size", cfg.get("per_device_eval_batch_size", 32)))),
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=0,
+        pin_memory=bool(cfg.get("dataloader_pin_memory", device.type == "cuda")),
+    )
+    items: list[dict[str, Any]] = []
+    offset = 0
+    progress = tqdm(
+        loader,
+        desc=f"cache router features {split}",
+        disable=bool(cfg.get("disable_tqdm", False)),
+    )
+    with torch.no_grad():
+        for batch in progress:
+            input_features = batch["input_features"].to(device)
+            with build_autocast(device, cfg):
+                hidden = encoder(input_features).last_hidden_state
+            hidden = hidden.detach().to(dtype=torch.float16, device="cpu")
+            labels_tensor = batch["labels"].detach().cpu()
+            for row_index in range(hidden.size(0)):
+                filename = f"{offset + row_index:08d}.pt"
+                torch.save(
+                    {
+                        "hidden": hidden[row_index],
+                        "label": int(labels_tensor[row_index]),
+                    },
+                    cache_dir / filename,
+                )
+                items.append({"file": filename, "label": int(labels_tensor[row_index])})
+            offset += hidden.size(0)
+
+    metadata = {
+        "split": split,
+        "model_name_or_path": model_name_or_path,
+        "labels": labels,
+        "sample_count": len(dataset),
+        "hidden_dtype": "float16",
+        "items": items,
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"已建立路由器特徵快取: {cache_dir}", flush=True)
+
+
+def batch_hidden_states(
+    *,
+    batch: dict[str, torch.Tensor],
+    encoder,
+    device: torch.device,
+    cfg: dict[str, Any],
+) -> torch.Tensor:
+    if "hidden" in batch:
+        return batch["hidden"].to(device, non_blocking=True).float()
+    input_features = batch["input_features"].to(device, non_blocking=True)
+    with torch.no_grad():
+        with build_autocast(device, cfg):
+            return encoder(input_features).last_hidden_state.float()
+
+
 def build_autocast(device: torch.device, cfg: dict[str, Any]):
     if device.type != "cuda":
         return nullcontext()
@@ -190,10 +352,13 @@ def evaluate(
     )
     with torch.no_grad():
         for batch in progress:
-            input_features = batch["input_features"].to(device)
             labels = batch["labels"].to(device)
-            with build_autocast(device, cfg):
-                hidden = encoder(input_features).last_hidden_state
+            hidden = batch_hidden_states(
+                batch=batch,
+                encoder=encoder,
+                device=device,
+                cfg=cfg,
+            )
             loss, outputs = router.compute_loss(hidden.float(), labels)
             logits = outputs["logits"]
             similarities = outputs["queries"] @ outputs["keys"].transpose(0, 1)
@@ -269,12 +434,28 @@ def main() -> None:
 
     labels = [str(label) for label in router_cfg.get("labels", ["zh-TW", "nan-tw"])]
     model_name_or_path = str(
-        model_cfg.get("model_name_or_path") or "openai/whisper-medium"
+        args.model_name_or_path
+        or model_cfg.get("model_name_or_path")
+        or "openai/whisper-medium"
     )
-    output_dir = Path(str(router_cfg.get("output_dir") or "artifacts/models/contrastive_router"))
+    output_dir = Path(
+        str(
+            args.output_dir
+            or router_cfg.get("output_dir")
+            or "artifacts/models/contrastive_router"
+        )
+    )
+    if args.feature_cache_dir:
+        router_cfg["feature_cache_dir"] = str(args.feature_cache_dir)
+    if args.dataloader_num_workers is not None:
+        router_cfg["dataloader_num_workers"] = max(0, int(args.dataloader_num_workers))
+        if int(args.dataloader_num_workers) <= 0:
+            router_cfg["dataloader_persistent_workers"] = False
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        str(args.device) if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     if bool(router_cfg.get("tf32", False)) and torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -337,7 +518,59 @@ def main() -> None:
     if len(eval_dataset) == 0:
         raise ValueError("對比式路由驗證資料為空，請先檢查前處理後的 language_label。")
 
+    train_split = str(router_cfg.get("train_split") or data_cfg.get("train_split", "train"))
+    eval_split = str(router_cfg.get("eval_split") or data_cfg.get("eval_split", "dev"))
     collator = RouterCollator(processor)
+    use_feature_cache = bool(router_cfg.get("feature_cache_enabled", False))
+    if use_feature_cache:
+        cache_root = Path(
+            str(
+                router_cfg.get("feature_cache_dir")
+                or output_dir / "feature_cache"
+            )
+        )
+        train_cache_dir = cache_root / cache_key(
+            model_name_or_path=model_name_or_path,
+            split=train_split,
+            labels=labels,
+            max_samples=None if max_train_samples is None else int(max_train_samples),
+            sample_rate=int(data_cfg.get("sample_rate", 16000)),
+            max_audio_seconds=float(data_cfg.get("max_audio_seconds", 30.0)),
+        )
+        eval_cache_dir = cache_root / cache_key(
+            model_name_or_path=model_name_or_path,
+            split=eval_split,
+            labels=labels,
+            max_samples=None if max_eval_samples is None else int(max_eval_samples),
+            sample_rate=int(data_cfg.get("sample_rate", 16000)),
+            max_audio_seconds=float(data_cfg.get("max_audio_seconds", 30.0)),
+        )
+        build_router_feature_cache(
+            dataset=train_dataset,
+            collator=collator,
+            encoder=encoder,
+            device=device,
+            cfg=router_cfg,
+            cache_dir=train_cache_dir,
+            split=train_split,
+            model_name_or_path=model_name_or_path,
+            labels=labels,
+        )
+        build_router_feature_cache(
+            dataset=eval_dataset,
+            collator=collator,
+            encoder=encoder,
+            device=device,
+            cfg=router_cfg,
+            cache_dir=eval_cache_dir,
+            split=eval_split,
+            model_name_or_path=model_name_or_path,
+            labels=labels,
+        )
+        train_dataset = CachedRouterDataset(train_cache_dir)
+        eval_dataset = CachedRouterDataset(eval_cache_dir)
+        collator = CachedRouterCollator()
+
     num_workers = int(router_cfg.get("dataloader_num_workers", 1))
     loader_kwargs = {
         "collate_fn": collator,
@@ -366,7 +599,12 @@ def main() -> None:
         weight_decay=float(router_cfg.get("weight_decay", 0.01)),
     )
     epochs = float(args.num_epochs if args.num_epochs is not None else router_cfg.get("num_train_epochs", 10.0))
-    update_steps = max(1, int(len(train_loader) * epochs))
+    gradient_accumulation_steps = max(
+        1,
+        int(router_cfg.get("gradient_accumulation_steps", 1)),
+    )
+    update_steps_per_epoch = math.ceil(len(train_loader) / gradient_accumulation_steps)
+    update_steps = max(1, int(update_steps_per_epoch * epochs))
     warmup_steps = int(router_cfg.get("warmup_steps", 100))
     scheduler_type = str(router_cfg.get("lr_scheduler_type", "linear")).lower()
     min_lr_ratio = max(0.0, min(1.0, float(router_cfg.get("min_lr_ratio", 0.0))))
@@ -438,40 +676,51 @@ def main() -> None:
 
     best_macro_f1 = -1.0
     global_step = 0
+    optimizer_step = 0
     stale_epochs = 0
     full_epochs = max(1, int(epochs))
     best_checkpoint_path = output_dir / "contrastive_router.pt"
     for epoch in range(1, full_epochs + 1):
         router.train()
         losses: list[float] = []
+        optimizer.zero_grad(set_to_none=True)
         progress = tqdm(
             train_loader,
             desc=f"train contrastive router {epoch}/{full_epochs}",
             disable=bool(router_cfg.get("disable_tqdm", False)),
         )
-        for batch in progress:
+        for batch_index, batch in enumerate(progress, start=1):
             global_step += 1
-            input_features = batch["input_features"].to(device)
             labels_tensor = batch["labels"].to(device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.no_grad():
-                with build_autocast(device, router_cfg):
-                    hidden = encoder(input_features).last_hidden_state
-            loss, _outputs = router.compute_loss(hidden.float(), labels_tensor)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                router.parameters(),
-                float(router_cfg.get("max_grad_norm", 1.0)),
+            hidden = batch_hidden_states(
+                batch=batch,
+                encoder=encoder,
+                device=device,
+                cfg=router_cfg,
             )
-            optimizer.step()
-            scheduler.step()
+            loss, _outputs = router.compute_loss(hidden.float(), labels_tensor)
+            (loss / gradient_accumulation_steps).backward()
+            should_step = (
+                batch_index % gradient_accumulation_steps == 0
+                or batch_index == len(train_loader)
+            )
+            if should_step:
+                torch.nn.utils.clip_grad_norm_(
+                    router.parameters(),
+                    float(router_cfg.get("max_grad_norm", 1.0)),
+                )
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_step += 1
             loss_value = float(loss.detach().cpu())
             losses.append(loss_value)
-            progress.set_postfix(loss=f"{loss_value:.4f}")
+            progress.set_postfix(loss=f"{loss_value:.4f}", accum=f"{batch_index % gradient_accumulation_steps}/{gradient_accumulation_steps}")
             if (
                 bool(router_cfg.get("log_step_loss", False))
                 and wandb_run is not None
-                and global_step % int(router_cfg.get("logging_steps", 25)) == 0
+                and optimizer_step > 0
+                and optimizer_step % int(router_cfg.get("logging_steps", 25)) == 0
             ):
                 wandb_run.log(
                     {
@@ -479,7 +728,7 @@ def main() -> None:
                         "learning_rate": scheduler.get_last_lr()[0],
                         "epoch": epoch,
                     },
-                    step=global_step,
+                    step=optimizer_step,
                 )
 
         eval_metrics = evaluate(
@@ -493,6 +742,7 @@ def main() -> None:
         metrics = {
             "epoch": epoch,
             "global_step": global_step,
+            "optimizer_step": optimizer_step,
             "train_loss": train_loss,
             **{f"eval_{key}": value for key, value in eval_metrics.items()},
         }
@@ -502,7 +752,7 @@ def main() -> None:
         if wandb_run is not None:
             wandb_run.log(
                 filter_wandb_scalars(metrics),
-                step=global_step,
+                step=optimizer_step,
             )
 
         if improved:
