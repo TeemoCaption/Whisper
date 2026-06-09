@@ -436,7 +436,7 @@ def configure_wandb_environment(training_cfg: dict[str, Any], output_dir: Path) 
     project = str(training_cfg.get("wandb_project") or "whisper-tw")
     run_name = str(training_cfg.get("run_name") or output_dir.name)
     log_model = str(training_cfg.get("wandb_log_model", "false")).lower()
-    console = str(training_cfg.get("wandb_console") or "redirect").lower()
+    console = str(training_cfg.get("wandb_console") or "wrap").lower()
     os.environ.setdefault("WANDB_PROJECT", project)
     os.environ.setdefault("WANDB_NAME", run_name)
     os.environ.setdefault("WANDB_LOG_MODEL", log_model)
@@ -702,7 +702,7 @@ def setup_wandb_run(
         config=run_config,
         dir=str(output_dir),
         settings=wandb.Settings(
-            console=str(training_cfg.get("wandb_console") or os.environ.get("WANDB_CONSOLE") or "redirect")
+            console=str(training_cfg.get("wandb_console") or os.environ.get("WANDB_CONSOLE") or "wrap")
         ),
     )
     run.define_metric("epoch")
@@ -832,6 +832,8 @@ def train_one_epoch(
                 "train_learning_rate": scheduler.get_last_lr()[0],
             }
             print(json.dumps({"stage": "train_step", **metrics}, ensure_ascii=False), flush=True)
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=global_step)
             recent_loss = 0.0
             recent_count = 0
 
